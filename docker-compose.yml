@@ -1,0 +1,19 @@
+services:
+  marketplace-api:
+    build: .
+    container_name: marketplace-api
+    ports:
+      - "8001:8001"
+    env_file: .env
+    volumes:
+      - ./media:/app/media
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
