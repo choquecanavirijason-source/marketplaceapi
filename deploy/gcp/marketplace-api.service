@@ -1,0 +1,16 @@
+[Unit]
+Description=MARKETPLACEAPI FastAPI Service
+After=network.target elashesbackend.service
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/elashes/marketplaceapi
+EnvironmentFile=/opt/elashes/marketplaceapi/.env
+ExecStart=/opt/elashes/marketplaceapi/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8001 --workers 1
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

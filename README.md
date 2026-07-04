@@ -2,6 +2,26 @@
 
 Backend FastAPI para marketplace Elashes — gestión de productos, categorías y pedidos.
 
+## 🚀 Deploy en VM Ubuntu (Google Cloud)
+
+Este servicio corre en el puerto 8001 y debe desplegarse en /opt/elashes/marketplaceapi con un unit de systemd llamado marketplace.service.
+
+### Archivo de servicio
+- [deploy/gcp/marketplace-api.service](deploy/gcp/marketplace-api.service)
+
+### Comandos recomendados
+```bash
+sudo cp /opt/elashes/marketplaceapi/deploy/gcp/marketplace-api.service /etc/systemd/system/marketplace.service
+sudo systemctl daemon-reload
+sudo systemctl enable marketplace
+sudo systemctl restart marketplace
+```
+
+### Variable de entorno recomendada para la VM
+```env
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8080,http://34.55.150.142,https://34.55.150.142
+```
+
 ## 🚀 Quick Start con Docker
 
 ### Requisitos
