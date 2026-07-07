@@ -71,6 +71,13 @@ def booking_branches(_: Customer = Depends(_current_customer)):
     return _salon_get("/booking-public/branches")
 
 
+@router.get("/public-branches")
+def booking_public_branches():
+    """Puntos de recojo — visibles sin iniciar sesión (a diferencia de /branches,
+    que exige cuenta porque forma parte del flujo de reserva de citas)."""
+    return _salon_get("/booking-public/branches")
+
+
 @router.get("/availability")
 def booking_availability(
     day: str = Query(...),

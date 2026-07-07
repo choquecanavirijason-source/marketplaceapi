@@ -8,13 +8,14 @@ def upgrade():
         try:
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS mp_customers (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name       VARCHAR(150) NOT NULL,
-                    phone      VARCHAR(20),
-                    email      VARCHAR(150) NOT NULL UNIQUE,
-                    hashed_pw  VARCHAR(255) NOT NULL,
-                    is_active  INTEGER NOT NULL DEFAULT 1,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name          VARCHAR(150) NOT NULL,
+                    phone         VARCHAR(20),
+                    email         VARCHAR(150) NOT NULL UNIQUE,
+                    -- Nombre físico que mapea la entidad Customer: Column("password_hash", ...)
+                    password_hash VARCHAR(255),
+                    is_active     INTEGER NOT NULL DEFAULT 1,
+                    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """))
             conn.commit()
