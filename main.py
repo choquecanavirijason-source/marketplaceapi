@@ -16,6 +16,8 @@ import app.infrastructure.database.migrations.add_product_fields        as m5
 import app.infrastructure.database.migrations.add_order_address_fields  as m6
 import app.infrastructure.database.migrations.create_mp_customers       as m7
 import app.infrastructure.database.migrations.add_source_to_mp_customers as m8
+import app.infrastructure.database.migrations.create_ads_table          as m9
+import app.infrastructure.database.migrations.create_reels_table        as m10
 
 # ── Controllers ───────────────────────────────────────────────
 from app.presentation.controllers.categories_controller  import router as categories_router
@@ -25,6 +27,8 @@ from app.presentation.controllers.collections_controller import router as collec
 from app.presentation.controllers.customers_controller   import router as customers_router
 from app.presentation.controllers.auth_controller        import router as auth_router
 from app.presentation.controllers.booking_controller     import router as booking_router
+from app.presentation.controllers.ads_controller         import router as ads_router
+from app.presentation.controllers.reels_controller       import router as reels_router
 from app.infrastructure.database.seeders import run_seeders
 
 # ─────────────────────────────────────────────────────────────
@@ -58,6 +62,8 @@ MIGRATIONS = [
     ("mp_orders:address_fields", m6.upgrade),
     ("mp_customers",            m7.upgrade),
     ("mp_customers:source",     m8.upgrade),
+    ("mp_ads",                  m9.upgrade),
+    ("mp_reels",                m10.upgrade),
 ]
 
 for name, fn in MIGRATIONS:
@@ -81,6 +87,8 @@ app.include_router(products_router,    prefix=PREFIX)
 app.include_router(orders_router,      prefix=PREFIX)
 app.include_router(collections_router, prefix=PREFIX)
 app.include_router(customers_router,   prefix=PREFIX)
+app.include_router(ads_router,         prefix=PREFIX)
+app.include_router(reels_router,       prefix=PREFIX)
 
 
 @app.get("/")
