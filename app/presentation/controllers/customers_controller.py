@@ -16,12 +16,18 @@ _SALON_BACKEND_URL = os.getenv("SALON_BACKEND_URL", "http://127.0.0.1:8000")
 
 
 @router.get("/lookup")
-def lookup_customer(phone: str = Query(..., min_length=6), db: Session = Depends(get_db)):
+def lookup_customer(
+    phone: str = Query(..., min_length=6),
+    db: Session = Depends(get_db),
+    _=Depends(get_admin_user),
+):
     """
-    Búsqueda pública de cliente por teléfono.
+    Búsqueda de cliente por teléfono — SOLO ADMIN (ej. atención al cliente).
     1. Revisa pedidos anteriores en el marketplace.
     2. Si no hay, consulta el backend del salón (elashesbackend).
-    Devuelve nombre y email para pre-rellenar el checkout.
+    Ya no la usa el checkout de la app (ahora exige cuenta); antes era
+    pública y cualquiera podía ver nombre/email de otro cliente con solo
+    su teléfono.
     """
     phone = phone.strip()
 
@@ -91,6 +97,7 @@ def list_customers(db: Session = Depends(get_db), _=Depends(get_admin_user)):
 
     result = []
     seen_phones = set()
+    seen_emails = set()
     for r in order_rows:
         result.append({
             "customer_name": r.customer_name,
@@ -103,10 +110,18 @@ def list_customers(db: Session = Depends(get_db), _=Depends(get_admin_user)):
         })
         if r.customer_phone:
             seen_phones.add(r.customer_phone)
+        if r.customer_email:
+            seen_emails.add(r.customer_email.lower())
 
-    # Cuentas registradas sin ningún pedido todavía (no aparecerían arriba)
+    # Cuentas registradas sin ningún pedido todavía (no aparecerían arriba).
+    # Se compara también por email (no solo teléfono) porque el registro por
+    # app no pide teléfono — sin este chequeo, esas cuentas aparecían
+    # duplicadas: una vez por su pedido (agrupado por teléfono) y otra vez
+    # acá como si no tuvieran ningún pedido.
     for c in all_customers:
         if c.phone and c.phone in seen_phones:
+            continue
+        if c.email and c.email.lower() in seen_emails:
             continue
         result.append({
             "customer_name": c.name,

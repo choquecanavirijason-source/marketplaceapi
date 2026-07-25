@@ -7,6 +7,7 @@ from app.config.settings import settings
 
 ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 ALLOWED_VIDEO_EXT = {".mp4", ".mov", ".webm", ".m4v"}
+MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 MAX_VIDEO_SIZE_BYTES = 80 * 1024 * 1024  # 80 MB
 
 
@@ -21,8 +22,21 @@ def save_image(file: UploadFile, subfolder: str = "products") -> str:
     filename = f"{uuid.uuid4().hex}{ext}"
     filepath = os.path.join(folder, filename)
 
+    # Igual que save_video: se escribe por chunks para poder cortar apenas
+    # se supera el límite, en vez de leer el archivo completo a memoria
+    # (antes no había ningún límite de tamaño para imágenes).
+    size = 0
     with open(filepath, "wb") as f:
-        f.write(file.file.read())
+        while chunk := file.file.read(1024 * 1024):
+            size += len(chunk)
+            if size > MAX_IMAGE_SIZE_BYTES:
+                f.close()
+                os.remove(filepath)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"La imagen supera el límite de {MAX_IMAGE_SIZE_BYTES // (1024*1024)} MB",
+                )
+            f.write(chunk)
 
     return f"/media/marketplace/{subfolder}/{filename}"
 

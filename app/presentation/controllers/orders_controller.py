@@ -8,9 +8,11 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.dependencies import get_db, get_admin_user
+from app.domain.entities.customer import Customer
 from app.domain.entities.order import Order
 from app.domain.entities.order_item import OrderItem
 from app.domain.entities.product import Product
+from app.presentation.controllers.auth_controller import get_current_customer
 
 router = APIRouter(prefix="/orders", tags=["Pedidos"])
 
@@ -91,7 +93,11 @@ def _order_dict(o: Order) -> dict:
 # ── Público (Flutter) — crear pedido ──────────────────────────
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-def create_order(body: OrderIn, db: Session = Depends(get_db)):
+def create_order(
+    body: OrderIn,
+    db: Session = Depends(get_db),
+    current_customer: Customer = Depends(get_current_customer),
+):
     if not body.items:
         raise HTTPException(status_code=400, detail="El pedido debe tener al menos un producto")
 
@@ -119,9 +125,12 @@ def create_order(body: OrderIn, db: Session = Depends(get_db)):
                 subtotal=subtotal,
             ))
         else:
+            # with_for_update: bloquea la fila hasta el commit, para que dos
+            # pedidos simultáneos de la última unidad no lean el mismo stock
+            # antes de que el otro lo descuente (evita quedar en negativo).
             product = db.query(Product).filter(
                 Product.id == item_in.product_id, Product.is_active == True
-            ).first()
+            ).with_for_update().first()
             if not product:
                 raise HTTPException(status_code=400, detail=f"Producto {item_in.product_id} no disponible")
             if product.stock < item_in.quantity:
@@ -145,6 +154,7 @@ def create_order(body: OrderIn, db: Session = Depends(get_db)):
 
     order = Order(
         order_code=code,
+        customer_id=current_customer.id,
         customer_name=body.customer_name,
         customer_phone=body.customer_phone,
         customer_email=body.customer_email,
@@ -167,17 +177,17 @@ def create_order(body: OrderIn, db: Session = Depends(get_db)):
     return _order_dict(db.query(Order).options(joinedload(Order.items)).filter(Order.id == order.id).first())
 
 
-# ── Público (Flutter) — pedidos por teléfono ─────────────────
+# ── Cliente autenticado — sus propios pedidos ─────────────────
 
 @router.get("/my")
 def get_my_orders(
-    phone: str = Query(..., min_length=1),
     db: Session = Depends(get_db),
+    current_customer: Customer = Depends(get_current_customer),
 ):
     orders = (
         db.query(Order)
         .options(joinedload(Order.items))
-        .filter(Order.customer_phone == phone)
+        .filter(Order.customer_id == current_customer.id)
         .order_by(Order.created_at.desc())
         .all()
     )
@@ -241,14 +251,14 @@ async def update_order_status(
     if body.status == "cancelled" and o.status != "cancelled":
         for item in o.items:
             if item.product_id:
-                product = db.query(Product).filter(Product.id == item.product_id).first()
+                product = db.query(Product).filter(Product.id == item.product_id).with_for_update().first()
                 if product:
                     product.stock += item.quantity
     # Si se reactiva un pedido cancelado, volver a descontar
     elif o.status == "cancelled" and body.status != "cancelled":
         for item in o.items:
             if item.product_id:
-                product = db.query(Product).filter(Product.id == item.product_id).first()
+                product = db.query(Product).filter(Product.id == item.product_id).with_for_update().first()
                 if product:
                     if product.stock < item.quantity:
                         raise HTTPException(

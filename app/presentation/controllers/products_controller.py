@@ -33,6 +33,7 @@ def _to_dict(p: Product) -> dict:
         "rating": p.rating,
         "review_count": p.review_count,
         "is_active": p.is_active,
+        "source_product_id": p.source_product_id,
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "updated_at": p.updated_at.isoformat() if p.updated_at else None,
     }
@@ -222,6 +223,7 @@ class ImportProductBody(BaseModel):
     low_stock_threshold: int = 5
     video_url: Optional[str] = None
     image_url: Optional[str] = None
+    source_product_id: Optional[int] = None
 
 
 @router.post("/admin/import", status_code=status.HTTP_201_CREATED)
@@ -240,6 +242,7 @@ async def import_product(
         image_url=body.image_url, video_url=body.video_url,
         category_id=body.category_id,
         stock=body.stock, low_stock_threshold=body.low_stock_threshold,
+        source_product_id=body.source_product_id,
         is_active=True,
     )
     db.add(product)

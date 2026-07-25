@@ -18,6 +18,11 @@ import app.infrastructure.database.migrations.create_mp_customers       as m7
 import app.infrastructure.database.migrations.add_source_to_mp_customers as m8
 import app.infrastructure.database.migrations.create_ads_table          as m9
 import app.infrastructure.database.migrations.create_reels_table        as m10
+import app.infrastructure.database.migrations.add_source_product_id     as m11
+import app.infrastructure.database.migrations.create_reviews_table      as m12
+import app.infrastructure.database.migrations.create_delivery_points_table as m13
+import app.infrastructure.database.migrations.add_country_code_to_mp_customers as m14
+import app.infrastructure.database.migrations.add_customer_id_to_orders as m15
 
 # ── Controllers ───────────────────────────────────────────────
 from app.presentation.controllers.categories_controller  import router as categories_router
@@ -29,6 +34,8 @@ from app.presentation.controllers.auth_controller        import router as auth_r
 from app.presentation.controllers.booking_controller     import router as booking_router
 from app.presentation.controllers.ads_controller         import router as ads_router
 from app.presentation.controllers.reels_controller       import router as reels_router
+from app.presentation.controllers.reviews_controller     import router as reviews_router
+from app.presentation.controllers.delivery_points_controller import router as delivery_points_router
 from app.infrastructure.database.seeders import run_seeders
 
 # ─────────────────────────────────────────────────────────────
@@ -64,6 +71,11 @@ MIGRATIONS = [
     ("mp_customers:source",     m8.upgrade),
     ("mp_ads",                  m9.upgrade),
     ("mp_reels",                m10.upgrade),
+    ("mp_products:source_id",   m11.upgrade),
+    ("mp_reviews",              m12.upgrade),
+    ("mp_delivery_points",      m13.upgrade),
+    ("mp_customers:country_code", m14.upgrade),
+    ("mp_orders:customer_id",    m15.upgrade),
 ]
 
 for name, fn in MIGRATIONS:
@@ -89,6 +101,8 @@ app.include_router(collections_router, prefix=PREFIX)
 app.include_router(customers_router,   prefix=PREFIX)
 app.include_router(ads_router,         prefix=PREFIX)
 app.include_router(reels_router,       prefix=PREFIX)
+app.include_router(reviews_router,     prefix=PREFIX)
+app.include_router(delivery_points_router, prefix=PREFIX)
 
 
 @app.get("/")

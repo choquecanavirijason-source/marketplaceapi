@@ -12,7 +12,7 @@ from typing import Optional
 
 import bcrypt
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -20,7 +20,9 @@ from jose import jwt, JWTError
 
 from app.config.settings import settings
 from app.core.dependencies import get_db
+from app.core.rate_limit import rate_limit
 from app.domain.entities.customer import Customer
+from app.domain.entities.review import Review
 
 _SALON_BACKEND_URL = os.getenv("SALON_BACKEND_URL", "http://127.0.0.1:8000")
 
@@ -57,6 +59,24 @@ def _get_by_id(db: Session, customer_id: int) -> Optional[Customer]:
     return db.query(Customer).filter(Customer.id == customer_id).first()
 
 
+def get_current_customer(
+    db: Session = Depends(get_db), token: str = Depends(_bearer)
+) -> Customer:
+    """Dependencia reutilizable para endpoints que requieren un cliente logueado
+    (ej. dejar una reseña). Lanza 401 si el token es inválido o el cliente no existe."""
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[_ALGO])
+        customer_id = int(payload["sub"])
+    except (JWTError, KeyError, ValueError):
+        raise HTTPException(status_code=401, detail="Token inválido")
+    customer = _get_by_id(db, customer_id)
+    if not customer:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    if not customer.is_active:
+        raise HTTPException(status_code=403, detail="Cuenta desactivada")
+    return customer
+
+
 def _response(customer: Customer) -> dict:
     token = _create_token(customer.id)
     return {
@@ -77,6 +97,7 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
     phone: Optional[str] = None
+    country_code: Optional[str] = None
 
 
 class LoginRequest(BaseModel):
@@ -88,7 +109,8 @@ class LoginRequest(BaseModel):
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/register", status_code=201)
-def register(payload: RegisterRequest, db: Session = Depends(get_db)):
+def register(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)):
+    rate_limit(request, "register", max_attempts=5, window_seconds=60)
     if db.query(Customer).filter(Customer.email == payload.email).first():
         raise HTTPException(status_code=400, detail="Ya existe una cuenta con ese email")
     customer = Customer(
@@ -97,6 +119,7 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         email=payload.email,
         hashed_pw=_hash(payload.password),
         source="app",
+        country_code=(payload.country_code or "").strip().upper() or None,
     )
     db.add(customer)
     db.commit()
@@ -105,7 +128,9 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/login")
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    # Límite por IP — antes no había nada frenando fuerza bruta de contraseña/CI.
+    rate_limit(request, "login", max_attempts=5, window_seconds=60)
     # ── 1. Intentar login normal con mp_customers (por email o nombre) ─────────
     from sqlalchemy import func
 
@@ -177,18 +202,39 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
 
 
 @router.get("/me")
-def me(db: Session = Depends(get_db), token: str = Depends(_bearer)):
-    try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[_ALGO])
-        customer_id = int(payload["sub"])
-    except (JWTError, KeyError, ValueError):
-        raise HTTPException(status_code=401, detail="Token inválido")
-    customer = _get_by_id(db, customer_id)
-    if not customer:
-        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+def me(customer: Customer = Depends(get_current_customer), db: Session = Depends(get_db)):
+    reviews_count = db.query(Review).filter(Review.customer_id == customer.id).count()
     return {
         "id": customer.id,
         "nombre": customer.name,
         "email": customer.email,
         "phone": customer.phone,
+        "reviews_count": reviews_count,
+    }
+
+
+class UpdateProfileRequest(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+
+
+@router.put("/me")
+def update_me(
+    payload: UpdateProfileRequest,
+    customer: Customer = Depends(get_current_customer),
+    db: Session = Depends(get_db),
+):
+    if payload.name is not None and payload.name.strip():
+        customer.name = payload.name.strip()
+    if payload.phone is not None:
+        customer.phone = payload.phone.strip()
+    db.commit()
+    db.refresh(customer)
+    reviews_count = db.query(Review).filter(Review.customer_id == customer.id).count()
+    return {
+        "id": customer.id,
+        "nombre": customer.name,
+        "email": customer.email,
+        "phone": customer.phone,
+        "reviews_count": reviews_count,
     }

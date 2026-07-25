@@ -34,19 +34,37 @@ def _to_dict(r: Reel) -> dict:
     }
 
 
-def _load(db: Session, *, active_only: bool = False):
+def _load(
+    db: Session,
+    *,
+    active_only: bool = False,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+):
     q = db.query(Reel).options(joinedload(Reel.product))
     if active_only:
         q = q.filter(Reel.is_active == True)
-    return q.order_by(Reel.sort_order, Reel.id).all()
+    q = q.order_by(Reel.sort_order, Reel.id)
+    if offset is not None:
+        q = q.offset(offset)
+    if limit is not None:
+        q = q.limit(limit)
+    return q.all()
 
 
 # ── Público (Flutter) ──────────────────────────────────────────────────────────
 
 @router.get("")
-def list_reels(db: Session = Depends(get_db)):
-    """Reels activos para la pantalla de reels de la app, ya ordenados."""
-    return [_to_dict(r) for r in _load(db, active_only=True)]
+def list_reels(
+    limit: Optional[int] = None,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    """Reels activos para la pantalla de reels de la app, ya ordenados.
+
+    Soporta paginación (limit/offset) para no cargar todos los videos de golpe.
+    """
+    return [_to_dict(r) for r in _load(db, active_only=True, limit=limit, offset=offset)]
 
 
 # ── Admin ──────────────────────────────────────────────────────────────────────

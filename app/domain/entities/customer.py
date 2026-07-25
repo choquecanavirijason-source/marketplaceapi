@@ -16,3 +16,6 @@ class Customer(Base):
     created_at    = Column(DateTime, default=datetime.utcnow, nullable=False)
     # 'app' = se registró directamente en la app | 'salon' = vino del salón vía CI
     source        = Column(String(20), nullable=False, default="app")
+    # Código ISO (2 letras) del país del cliente — se pre-llena automáticamente
+    # en el registro según el idioma/región del dispositivo, editable por el cliente.
+    country_code  = Column(String(2), nullable=True)
