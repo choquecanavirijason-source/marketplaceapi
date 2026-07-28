@@ -111,7 +111,17 @@ class LoginRequest(BaseModel):
 @router.post("/register", status_code=201)
 def register(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)):
     rate_limit(request, "register", max_attempts=5, window_seconds=60)
-    if db.query(Customer).filter(Customer.email == payload.email).first():
+    # Sin importar mayúsculas/minúsculas — igual que el login, que ya busca
+    # con func.lower(). Antes esta comparación era sensible a mayúsculas,
+    # así que "Ana@x.com" y "ana@x.com" podían registrarse como dos cuentas
+    # distintas y el login quedaba ambiguo sobre cuál resolvía.
+    from sqlalchemy import func
+
+    if (
+        db.query(Customer)
+        .filter(func.lower(Customer.email) == payload.email.strip().lower())
+        .first()
+    ):
         raise HTTPException(status_code=400, detail="Ya existe una cuenta con ese email")
     customer = Customer(
         name=payload.name,
