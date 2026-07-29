@@ -30,6 +30,7 @@ router = APIRouter(prefix="/api/v1/auth", tags=["Auth Clientes"])
 
 _ALGO = "HS256"
 _bearer = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+_bearer_optional = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -74,6 +75,26 @@ def get_current_customer(
         raise HTTPException(status_code=404, detail="Cliente no encontrado")
     if not customer.is_active:
         raise HTTPException(status_code=403, detail="Cuenta desactivada")
+    return customer
+
+
+def get_current_customer_optional(
+    db: Session = Depends(get_db), token: Optional[str] = Depends(_bearer_optional)
+) -> Optional[Customer]:
+    """Igual que [get_current_customer] pero sin exigir sesión — para
+    endpoints públicos (ej. listar reels) que igual quieren marcar
+    `is_liked` cuando SÍ hay una cuenta logueada, sin bloquear a quien
+    navega sin cuenta."""
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[_ALGO])
+        customer_id = int(payload["sub"])
+    except (JWTError, KeyError, ValueError):
+        return None
+    customer = _get_by_id(db, customer_id)
+    if not customer or not customer.is_active:
+        return None
     return customer
 
 

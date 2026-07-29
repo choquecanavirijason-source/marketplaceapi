@@ -38,8 +38,8 @@ class OrderItemIn(BaseModel):
 
 
 class OrderIn(BaseModel):
-    customer_name: str
-    customer_phone: str
+    customer_name: Optional[str] = None  # ignorado: se usa el del perfil (Customer.name)
+    customer_phone: Optional[str] = None  # ignorado: se usa el del perfil (Customer.phone)
     customer_email: Optional[str] = None
     notes: Optional[str] = None
     delivery_address: Optional[str] = None
@@ -155,8 +155,8 @@ def create_order(
     order = Order(
         order_code=code,
         customer_id=current_customer.id,
-        customer_name=body.customer_name,
-        customer_phone=body.customer_phone,
+        customer_name=current_customer.name,
+        customer_phone=current_customer.phone,
         customer_email=body.customer_email,
         total=round(total, 2),
         notes=body.notes,

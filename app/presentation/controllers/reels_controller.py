@@ -1,17 +1,29 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.dependencies import get_db, get_admin_user
 from app.core.media import save_image, save_video
+from app.domain.entities.customer import Customer
 from app.domain.entities.reel import Reel
+from app.domain.entities.reel_like import ReelLike
 from app.domain.entities.product import Product
+from app.presentation.controllers.auth_controller import (
+    get_current_customer,
+    get_current_customer_optional,
+)
 
 router = APIRouter(prefix="/reels", tags=["Reels"])
 
 
-def _to_dict(r: Reel) -> dict:
+def _to_dict(
+    r: Reel,
+    *,
+    like_count: int = 0,
+    is_liked: bool = False,
+) -> dict:
     product = None
     p = getattr(r, "product", None)
     if p:
@@ -31,7 +43,32 @@ def _to_dict(r: Reel) -> dict:
         "is_active": r.is_active,
         "sort_order": r.sort_order,
         "created_at": r.created_at.isoformat() if r.created_at else None,
+        "like_count": like_count,
+        "is_liked": is_liked,
     }
+
+
+def _like_counts(db: Session, reel_ids: list[int]) -> dict[int, int]:
+    if not reel_ids:
+        return {}
+    rows = (
+        db.query(ReelLike.reel_id, func.count(ReelLike.id))
+        .filter(ReelLike.reel_id.in_(reel_ids))
+        .group_by(ReelLike.reel_id)
+        .all()
+    )
+    return {reel_id: count for reel_id, count in rows}
+
+
+def _liked_reel_ids(db: Session, customer_id: Optional[int], reel_ids: list[int]) -> set[int]:
+    if not customer_id or not reel_ids:
+        return set()
+    rows = (
+        db.query(ReelLike.reel_id)
+        .filter(ReelLike.customer_id == customer_id, ReelLike.reel_id.in_(reel_ids))
+        .all()
+    )
+    return {reel_id for (reel_id,) in rows}
 
 
 def _load(
@@ -59,19 +96,102 @@ def list_reels(
     limit: Optional[int] = None,
     offset: int = 0,
     db: Session = Depends(get_db),
+    current_customer: Optional[Customer] = Depends(get_current_customer_optional),
 ):
     """Reels activos para la pantalla de reels de la app, ya ordenados.
 
     Soporta paginación (limit/offset) para no cargar todos los videos de golpe.
+    Incluye like_count siempre, e is_liked si hay sesión iniciada.
     """
-    return [_to_dict(r) for r in _load(db, active_only=True, limit=limit, offset=offset)]
+    reels = _load(db, active_only=True, limit=limit, offset=offset)
+    ids = [r.id for r in reels]
+    counts = _like_counts(db, ids)
+    liked = _liked_reel_ids(db, current_customer.id if current_customer else None, ids)
+    return [
+        _to_dict(r, like_count=counts.get(r.id, 0), is_liked=r.id in liked)
+        for r in reels
+    ]
+
+
+@router.get("/liked")
+def list_my_liked_reels(
+    db: Session = Depends(get_db),
+    current_customer: Customer = Depends(get_current_customer),
+):
+    """Reels a los que el cliente logueado les dio like — "Mis reels"."""
+    reels = (
+        db.query(Reel)
+        .join(ReelLike, ReelLike.reel_id == Reel.id)
+        .options(joinedload(Reel.product))
+        .filter(ReelLike.customer_id == current_customer.id, Reel.is_active == True)
+        .order_by(ReelLike.created_at.desc())
+        .all()
+    )
+    ids = [r.id for r in reels]
+    counts = _like_counts(db, ids)
+    return [_to_dict(r, like_count=counts.get(r.id, 0), is_liked=True) for r in reels]
+
+
+@router.post("/{reel_id}/like", status_code=status.HTTP_204_NO_CONTENT)
+def like_reel(
+    reel_id: int,
+    db: Session = Depends(get_db),
+    current_customer: Customer = Depends(get_current_customer),
+):
+    if not db.query(Reel).filter(Reel.id == reel_id).first():
+        raise HTTPException(status_code=404, detail="Reel no encontrado")
+    exists = (
+        db.query(ReelLike)
+        .filter(ReelLike.customer_id == current_customer.id, ReelLike.reel_id == reel_id)
+        .first()
+    )
+    if not exists:
+        db.add(ReelLike(customer_id=current_customer.id, reel_id=reel_id))
+        db.commit()
+
+
+@router.delete("/{reel_id}/like", status_code=status.HTTP_204_NO_CONTENT)
+def unlike_reel(
+    reel_id: int,
+    db: Session = Depends(get_db),
+    current_customer: Customer = Depends(get_current_customer),
+):
+    db.query(ReelLike).filter(
+        ReelLike.customer_id == current_customer.id, ReelLike.reel_id == reel_id
+    ).delete()
+    db.commit()
 
 
 # ── Admin ──────────────────────────────────────────────────────────────────────
 
 @router.get("/admin")
 def admin_list_all(db: Session = Depends(get_db), _=Depends(get_admin_user)):
-    return [_to_dict(r) for r in _load(db)]
+    reels = _load(db)
+    counts = _like_counts(db, [r.id for r in reels])
+    return [_to_dict(r, like_count=counts.get(r.id, 0)) for r in reels]
+
+
+@router.get("/admin/{reel_id}/likes")
+def admin_list_reel_likes(reel_id: int, db: Session = Depends(get_db), _=Depends(get_admin_user)):
+    """Quién le dio like a este reel — para el panel de administración."""
+    if not db.query(Reel).filter(Reel.id == reel_id).first():
+        raise HTTPException(status_code=404, detail="Reel no encontrado")
+    rows = (
+        db.query(Customer.id, Customer.name, Customer.email, ReelLike.created_at)
+        .join(ReelLike, ReelLike.customer_id == Customer.id)
+        .filter(ReelLike.reel_id == reel_id)
+        .order_by(ReelLike.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "customer_id": customer_id,
+            "name": name,
+            "email": email,
+            "liked_at": liked_at.isoformat() if liked_at else None,
+        }
+        for customer_id, name, email, liked_at in rows
+    ]
 
 
 @router.post("/admin", status_code=status.HTTP_201_CREATED)

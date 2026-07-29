@@ -71,20 +71,8 @@ def list_customers(db: Session = Depends(get_db), _=Depends(get_admin_user)):
     con sus pedidos si los tienen, más pedidos de invitados sin cuenta.
     Incluye cuentas con 0 pedidos (ej. clientas del salón que ya iniciaron
     sesión con su CI pero todavía no compraron nada)."""
-    order_rows = (
-        db.query(
-            Order.customer_name,
-            Order.customer_phone,
-            Order.customer_email,
-            func.count(Order.id).label("order_count"),
-            func.sum(Order.total).label("total_spent"),
-            func.max(Order.created_at).label("last_order_at"),
-        )
-        .group_by(Order.customer_phone)
-        .all()
-    )
-
     all_customers = db.query(Customer).all()
+    customers_by_id = {c.id: c for c in all_customers}
     source_by_email = {c.email: c.source for c in all_customers}
     source_by_phone = {c.phone: c.source for c in all_customers if c.phone}
 
@@ -96,9 +84,58 @@ def list_customers(db: Session = Depends(get_db), _=Depends(get_admin_user)):
         return "salon"  # pedido de invitado sin cuenta → vino del salón
 
     result = []
+    seen_customer_ids = set()
     seen_phones = set()
     seen_emails = set()
-    for r in order_rows:
+
+    # Pedidos ligados a una cuenta (customer_id): agrupar por la cuenta real,
+    # no por el teléfono que haya puesto en ese checkout puntual — si no, un
+    # mismo cliente que cambia de teléfono entre pedidos aparecía duplicado.
+    acct_rows = (
+        db.query(
+            Order.customer_id,
+            func.count(Order.id).label("order_count"),
+            func.sum(Order.total).label("total_spent"),
+            func.max(Order.created_at).label("last_order_at"),
+        )
+        .filter(Order.customer_id.isnot(None))
+        .group_by(Order.customer_id)
+        .all()
+    )
+    for r in acct_rows:
+        c = customers_by_id.get(r.customer_id)
+        if not c:
+            continue  # cuenta eliminada; ignorar pedidos huérfanos
+        result.append({
+            "customer_name": c.name,
+            "customer_phone": c.phone,
+            "customer_email": c.email,
+            "order_count": r.order_count,
+            "total_spent": float(r.total_spent or 0),
+            "last_order_at": r.last_order_at.isoformat() if r.last_order_at else None,
+            "source": c.source,
+        })
+        seen_customer_ids.add(c.id)
+        if c.phone:
+            seen_phones.add(c.phone)
+        seen_emails.add(c.email.lower())
+
+    # Pedidos de invitados sin cuenta (customer_id nulo, incluye pedidos
+    # anteriores a que existiera esta columna): sigue agrupando por teléfono.
+    guest_rows = (
+        db.query(
+            Order.customer_name,
+            Order.customer_phone,
+            Order.customer_email,
+            func.count(Order.id).label("order_count"),
+            func.sum(Order.total).label("total_spent"),
+            func.max(Order.created_at).label("last_order_at"),
+        )
+        .filter(Order.customer_id.is_(None))
+        .group_by(Order.customer_phone)
+        .all()
+    )
+    for r in guest_rows:
         result.append({
             "customer_name": r.customer_name,
             "customer_phone": r.customer_phone,
@@ -119,6 +156,8 @@ def list_customers(db: Session = Depends(get_db), _=Depends(get_admin_user)):
     # duplicadas: una vez por su pedido (agrupado por teléfono) y otra vez
     # acá como si no tuvieran ningún pedido.
     for c in all_customers:
+        if c.id in seen_customer_ids:
+            continue
         if c.phone and c.phone in seen_phones:
             continue
         if c.email and c.email.lower() in seen_emails:

@@ -23,6 +23,9 @@ import app.infrastructure.database.migrations.create_reviews_table      as m12
 import app.infrastructure.database.migrations.create_delivery_points_table as m13
 import app.infrastructure.database.migrations.add_country_code_to_mp_customers as m14
 import app.infrastructure.database.migrations.add_customer_id_to_orders as m15
+import app.infrastructure.database.migrations.create_favorites_table as m16
+import app.infrastructure.database.migrations.create_presence_table as m17
+import app.infrastructure.database.migrations.create_reel_likes_table as m18
 
 # ── Controllers ───────────────────────────────────────────────
 from app.presentation.controllers.categories_controller  import router as categories_router
@@ -36,6 +39,8 @@ from app.presentation.controllers.ads_controller         import router as ads_ro
 from app.presentation.controllers.reels_controller       import router as reels_router
 from app.presentation.controllers.reviews_controller     import router as reviews_router
 from app.presentation.controllers.delivery_points_controller import router as delivery_points_router
+from app.presentation.controllers.favorites_controller     import router as favorites_router
+from app.presentation.controllers.presence_controller       import router as presence_router
 from app.infrastructure.database.seeders import run_seeders
 
 # ─────────────────────────────────────────────────────────────
@@ -76,6 +81,9 @@ MIGRATIONS = [
     ("mp_delivery_points",      m13.upgrade),
     ("mp_customers:country_code", m14.upgrade),
     ("mp_orders:customer_id",    m15.upgrade),
+    ("mp_favorites",             m16.upgrade),
+    ("mp_presence",              m17.upgrade),
+    ("mp_reel_likes",            m18.upgrade),
 ]
 
 for name, fn in MIGRATIONS:
@@ -103,6 +111,8 @@ app.include_router(ads_router,         prefix=PREFIX)
 app.include_router(reels_router,       prefix=PREFIX)
 app.include_router(reviews_router,     prefix=PREFIX)
 app.include_router(delivery_points_router, prefix=PREFIX)
+app.include_router(favorites_router,   prefix=PREFIX)
+app.include_router(presence_router,    prefix=PREFIX)
 
 
 @app.get("/")
