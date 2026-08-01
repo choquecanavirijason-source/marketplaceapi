@@ -21,6 +21,10 @@ class Product(Base):
     rating              = Column(Float, default=0.0, nullable=True)
     review_count        = Column(Integer, default=0, nullable=True)
     is_active           = Column(Boolean, default=True, nullable=False)
+    # Destacado manual desde el admin — se muestra siempre en /products/featured
+    # antes de completar el resto con el algoritmo de más vendidos/mejor
+    # calificados (ver products_controller.get_featured_products).
+    is_featured         = Column(Boolean, default=False, nullable=False)
     # Id del Product original en elashesbackend, si se importó del inventario
     # del salón. Permite sincronizar el stock más adelante sin depender del
     # nombre. Null si el producto se creó directamente en el marketplace.

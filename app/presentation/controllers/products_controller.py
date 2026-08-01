@@ -33,6 +33,7 @@ def _to_dict(p: Product) -> dict:
         "rating": p.rating,
         "review_count": p.review_count,
         "is_active": p.is_active,
+        "is_featured": p.is_featured,
         "source_product_id": p.source_product_id,
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "updated_at": p.updated_at.isoformat() if p.updated_at else None,
@@ -65,31 +66,50 @@ def get_featured_products(
     limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),
 ):
-    """Productos más comprados. Si no hay ventas, retorna los mejor calificados."""
-    sales_subq = (
-        db.query(
-            OrderItem.product_id,
-            func.sum(OrderItem.quantity).label("total_sold"),
-        )
-        .filter(OrderItem.product_id.isnot(None))
-        .group_by(OrderItem.product_id)
-        .subquery()
-    )
-
-    rows = (
-        db.query(Product, func.coalesce(sales_subq.c.total_sold, 0).label("sold"))
+    """Destacados = primero los que el admin marcó manualmente
+    (is_featured, ver PATCH /admin/{id}/featured), y si sobra espacio hasta
+    `limit` se completa con el algoritmo automático de siempre (más
+    comprados; si no hay ventas, mejor calificados)."""
+    manual = (
+        db.query(Product)
         .options(joinedload(Product.category))
-        .outerjoin(sales_subq, Product.id == sales_subq.c.product_id)
-        .filter(Product.is_active == True)
-        .order_by(
-            func.coalesce(sales_subq.c.total_sold, 0).desc(),
-            Product.rating.desc(),
-            Product.created_at.desc(),
-        )
+        .filter(Product.is_active == True, Product.is_featured == True)
+        .order_by(Product.updated_at.desc())
         .limit(limit)
         .all()
     )
-    return [_to_dict(p) for p, _ in rows]
+    result = list(manual)
+    remaining = limit - len(result)
+    if remaining > 0:
+        sales_subq = (
+            db.query(
+                OrderItem.product_id,
+                func.sum(OrderItem.quantity).label("total_sold"),
+            )
+            .filter(OrderItem.product_id.isnot(None))
+            .group_by(OrderItem.product_id)
+            .subquery()
+        )
+        auto_q = (
+            db.query(Product, func.coalesce(sales_subq.c.total_sold, 0).label("sold"))
+            .options(joinedload(Product.category))
+            .outerjoin(sales_subq, Product.id == sales_subq.c.product_id)
+            .filter(Product.is_active == True)
+        )
+        exclude_ids = [p.id for p in manual]
+        if exclude_ids:
+            auto_q = auto_q.filter(~Product.id.in_(exclude_ids))
+        rows = (
+            auto_q.order_by(
+                func.coalesce(sales_subq.c.total_sold, 0).desc(),
+                Product.rating.desc(),
+                Product.created_at.desc(),
+            )
+            .limit(remaining)
+            .all()
+        )
+        result += [p for p, _ in rows]
+    return [_to_dict(p) for p in result]
 
 
 @router.get("/{product_id}")
@@ -306,6 +326,28 @@ async def adjust_stock(
     if not p:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
     p.stock = max(0, body.stock)
+    db.commit()
+    db.refresh(p)
+    return _to_dict(db.query(Product).options(joinedload(Product.category)).filter(Product.id == p.id).first())
+
+
+class FeaturedUpdate(BaseModel):
+    is_featured: bool
+
+
+@router.patch("/admin/{product_id}/featured")
+async def set_featured(
+    product_id: int,
+    body: FeaturedUpdate,
+    db: Session = Depends(get_db),
+    _=Depends(get_admin_user),
+):
+    """Marca/desmarca un producto como destacado manual — ver
+    get_featured_products para cómo se combina con el algoritmo automático."""
+    p = db.query(Product).filter(Product.id == product_id).first()
+    if not p:
+        raise HTTPException(status_code=404, detail="Producto no encontrado")
+    p.is_featured = body.is_featured
     db.commit()
     db.refresh(p)
     return _to_dict(db.query(Product).options(joinedload(Product.category)).filter(Product.id == p.id).first())
