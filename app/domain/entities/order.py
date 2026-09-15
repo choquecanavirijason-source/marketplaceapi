@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text
+from sqlalchemy import Column, ForeignKey, Integer, String, Float, DateTime, Text
 from sqlalchemy.orm import relationship
 from app.infrastructure.database import Base
 
@@ -9,6 +9,9 @@ class Order(Base):
 
     id             = Column(Integer, primary_key=True, index=True)
     order_code     = Column(String(20), unique=True, index=True, nullable=False)
+    # Dueño real del pedido (cuenta autenticada). Nullable: pedidos de antes
+    # de este campo no lo tienen y no se les inventa un vínculo.
+    customer_id    = Column(Integer, ForeignKey("mp_customers.id"), nullable=True)
     customer_name  = Column(String(150), nullable=False)
     customer_phone = Column(String(20), nullable=False)
     customer_email = Column(String(150), nullable=True)
