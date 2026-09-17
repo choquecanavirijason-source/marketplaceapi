@@ -75,9 +75,10 @@ HLS_RENDITIONS = [
 #     bufferear en datos móviles ("a tirones" mientras carga).
 #   640px/CRF27/700kbps  -> carga fluida, pero se ve pixelado/con poca
 #     nitidez (resolución y bits por pixel ambos muy bajos).
-# Punto medio: algo más de resolución y de bitrate que 640/700k, bastante
-# menos que 1080/1800k — a probar si esto ya da un balance aceptable.
-REEL_RENDITION = {"max_dim": 720, "crf": "25", "v_maxrate": "1100k", "v_bufsize": "1800k", "a_bitrate": "96k"}
+#   720px/CRF25/1100kbps -> carga fluida y se ve bien, confirmado en el
+#     celular real. Se sube un poco más la calidad (mismo max_dim, solo más
+#     bits) para ver si sigue aguantando sin cortarse.
+REEL_RENDITION = {"max_dim": 720, "crf": "23", "v_maxrate": "1400k", "v_bufsize": "2200k", "a_bitrate": "112k"}
 
 
 def _is_hdr_source(source_path: str) -> bool:
