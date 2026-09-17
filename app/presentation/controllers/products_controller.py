@@ -1,12 +1,13 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.dependencies import get_db, get_admin_user
-from app.core.media import save_image, save_video
+from app.core.media import get_video_download_url, save_image, save_video
 from app.domain.entities.product import Product
 from app.domain.entities.category import Category
 from app.domain.entities.order import Order
@@ -25,6 +26,7 @@ def _to_dict(p: Product) -> dict:
         "original_price": p.original_price,
         "image_url": p.image_url,
         "video_url": p.video_url,
+        "video_download_url": get_video_download_url(p.video_url),
         "category_id": p.category_id,
         "category_name": p.category.name if p.category else None,
         "stock": p.stock,
@@ -217,7 +219,7 @@ async def create_product(
         raise HTTPException(status_code=400, detail="Categoría no existe")
 
     image_url = save_image(image, "products") if image and image.filename else None
-    final_video_url = save_video(video, "products") if video and video.filename else (video_url or None)
+    final_video_url = await run_in_threadpool(save_video, video, "products") if video and video.filename else (video_url or None)
     product = Product(
         name=name, brand=brand, description=description,
         price=price, original_price=original_price,
@@ -301,7 +303,7 @@ async def update_product(
     if category_id is not None:         p.category_id = None if category_id == 0 else category_id
     if stock is not None:               p.stock = stock
     if low_stock_threshold is not None: p.low_stock_threshold = low_stock_threshold
-    if video and video.filename:        p.video_url = save_video(video, "products")
+    if video and video.filename:        p.video_url = await run_in_threadpool(save_video, video, "products")
     elif video_url is not None:         p.video_url = video_url or None
     if is_active is not None:           p.is_active = is_active
     if image and image.filename:        p.image_url = save_image(image, "products")

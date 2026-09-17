@@ -1,11 +1,12 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.dependencies import get_db, get_admin_user
-from app.core.media import save_image, save_video
+from app.core.media import get_video_download_url, save_image, save_video
 from app.domain.entities.customer import Customer
 from app.domain.entities.reel import Reel
 from app.domain.entities.reel_like import ReelLike
@@ -36,6 +37,7 @@ def _to_dict(
     return {
         "id": r.id,
         "video_url": r.video_url,
+        "video_download_url": get_video_download_url(r.video_url),
         "thumbnail_url": r.thumbnail_url,
         "caption": r.caption,
         "product_id": r.product_id,
@@ -205,7 +207,7 @@ async def create_reel(
     db: Session = Depends(get_db),
     _=Depends(get_admin_user),
 ):
-    final_video_url = save_video(video, "reels") if video and video.filename else (video_url or None)
+    final_video_url = await run_in_threadpool(save_video, video, "reels") if video and video.filename else (video_url or None)
     if not final_video_url:
         raise HTTPException(status_code=400, detail="Sube un video o pega un link directo (mp4, etc.)")
 
@@ -246,7 +248,7 @@ async def update_reel(
     if not reel:
         raise HTTPException(status_code=404, detail="Reel no encontrado")
 
-    if video and video.filename:      reel.video_url = save_video(video, "reels")
+    if video and video.filename:      reel.video_url = await run_in_threadpool(save_video, video, "reels")
     elif video_url is not None:       reel.video_url = video_url or reel.video_url
     if caption is not None:           reel.caption = caption
     if product_id is not None:        reel.product_id = None if product_id == 0 else product_id

@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from typing import Optional
 
 from fastapi import HTTPException, UploadFile
 
@@ -43,6 +44,130 @@ def _remux_faststart(filepath: str) -> None:
             os.remove(tmp_path)
 
 
+# Dos calidades alcanza para este volumen de uso — "low" para conexiones
+# lentas, "high" para wifi/datos buenos. force_original_aspect_ratio=decrease
+# respeta la orientación real del video (funciona igual para reels verticales
+# que para tutoriales horizontales) sin estirarlo ni recortarlo.
+#
+# "high" usa max_dim 1920 — con un celular grabando a 1080x1920 (portrait,
+# lo normal en reels), eso significa que NO se reduce resolución, solo se
+# recomprime.
+#
+# Se usa CRF (calidad constante) en vez de bitrate fijo — en vez de decirle
+# a ffmpeg "usá tantos kbps sí o sí" (que desperdicia bits en escenas simples
+# y le faltan en escenas con movimiento, perdiendo nitidez ahí), se le pide
+# "mantené esta calidad visual" y usa los bits que haga falta. crf 18 es
+# considerado "visualmente sin pérdida" para H.264. v_maxrate/v_bufsize
+# quedan solo como techo de seguridad (necesario para streaming), no como
+# objetivo — por eso están generosos, para que casi nunca lo limiten.
+HLS_RENDITIONS = [
+    {"name": "low", "max_dim": 720, "crf": "23", "v_maxrate": "2000k", "v_bufsize": "3000k", "a_bitrate": "128k", "bandwidth": 2200000},
+    {"name": "high", "max_dim": 1920, "crf": "18", "v_maxrate": "8000k", "v_bufsize": "12000k", "a_bitrate": "192k", "bandwidth": 8300000},
+]
+
+
+def _is_hdr_source(source_path: str) -> bool:
+    """Detecta si el video de origen es HDR (HLG o PQ/HDR10) — típico del
+    modo "Video HDR" que activan solo por defecto varios iPhone. Si se
+    transcodifica sin avisarle a ffmpeg, el resultado queda marcado como
+    color de 10 bits (High 10 Profile), que la mayoría de los celulares
+    Android NO puede decodificar en hardware — el video ni siquiera arranca."""
+    if not shutil.which("ffprobe"):
+        return False
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=color_transfer",
+                "-of", "csv=p=0", source_path,
+            ],
+            capture_output=True,
+            timeout=30,
+            text=True,
+        )
+        transfer = result.stdout.strip().lower()
+        return transfer in {"arib-std-b67", "smpte2084"}  # HLG / PQ (HDR10)
+    except Exception:
+        return False
+
+
+def _generate_hls(source_path: str, out_dir: str) -> bool:
+    """Genera streaming adaptativo (HLS) del video en dos calidades, como
+    hacen YouTube/TikTok — el reproductor va pidiendo el archivo de a pocos
+    segundos en vez de bajar el video entero, y baja de calidad solo si la
+    conexión no da abasto. Antes servíamos el .mp4 pesado entero de una,
+    por eso reels de videos "pesados" se veían lentos/trabados con internet
+    limitado. No-op (devuelve False) si ffmpeg no está instalado."""
+    if not shutil.which("ffmpeg"):
+        return False
+    is_hdr = _is_hdr_source(source_path)
+    try:
+        for rendition in HLS_RENDITIONS:
+            # force_divisible_by=2: libx264 exige ancho/alto pares — sin esto,
+            # un video vertical (ej. 1080x1920) escalado a un box de 720
+            # puede dar un ancho impar (405) y ffmpeg tira "width not
+            # divisible by 2", aborta, y el video cae al .mov crudo de
+            # respaldo (que ni siquiera reproduce bien en el celular).
+            scale = f"scale='min({rendition['max_dim']},iw)':'min({rendition['max_dim']},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
+            if is_hdr:
+                # HDR (HLG/PQ) -> SDR de verdad, no solo "sacarle la etiqueta"
+                # (eso dejaría los colores planos/lavados porque los valores
+                # de píxel siguen siendo de una curva HLG interpretados como
+                # si fueran bt709). zscale+tonemap hace la conversión real.
+                video_filter = (
+                    "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+                    "tonemap=tonemap=hable:desat=0,"
+                    f"zscale=t=bt709:m=bt709:r=tv,format=yuv420p,{scale}"
+                )
+            else:
+                video_filter = scale
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", source_path,
+                    "-vf", video_filter,
+                    "-pix_fmt", "yuv420p",
+                    # fps_mode cfr SIN forzar -r: deja el frame rate constante
+                    # (arregla timestamps irregulares de video con frame rate
+                    # variable) pero respeta el fps real de la fuente — antes
+                    # forzábamos 30fps fijo, y un video grabado a 60fps se
+                    # veía notoriamente menos fluido que el original sin
+                    # necesidad (el bug real que rompía la reproducción era
+                    # otro: color HDR y ancho impar, ya arreglados aparte).
+                    "-fps_mode", "cfr",
+                    # "slow" (no "veryfast"): mucho mejor calidad por cada bit
+                    # de bitrate — tarda más en convertir, pero ya tenemos la
+                    # barra de "procesando" en el admin para eso.
+                    "-c:v", "libx264", "-preset", "slow",
+                    "-crf", rendition["crf"], "-maxrate", rendition["v_maxrate"], "-bufsize", rendition["v_bufsize"],
+                    "-g", "48", "-keyint_min", "48", "-sc_threshold", "0",
+                    "-c:a", "aac", "-b:a", rendition["a_bitrate"], "-ac", "2",
+                    "-f", "hls", "-hls_time", "4", "-hls_playlist_type", "vod",
+                    "-hls_flags", "independent_segments",
+                    "-hls_segment_filename", os.path.join(out_dir, f"{rendition['name']}_%03d.ts"),
+                    os.path.join(out_dir, f"{rendition['name']}.m3u8"),
+                ],
+                capture_output=True,
+                timeout=600,
+            )
+            if result.returncode != 0:
+                print(
+                    f"[_generate_hls] ffmpeg falló para {rendition['name']} "
+                    f"(source={source_path}): {result.stderr.decode(errors='replace')[-2000:]}"
+                )
+                return False
+
+        master_lines = ["#EXTM3U"]
+        for rendition in HLS_RENDITIONS:
+            master_lines.append(f"#EXT-X-STREAM-INF:BANDWIDTH={rendition['bandwidth']}")
+            master_lines.append(f"{rendition['name']}.m3u8")
+        with open(os.path.join(out_dir, "master.m3u8"), "w") as f:
+            f.write("\n".join(master_lines) + "\n")
+        return True
+    except Exception as exc:
+        print(f"[_generate_hls] excepción para {source_path}: {exc!r}")
+        return False
+
+
 def save_image(file: UploadFile, subfolder: str = "products") -> str:
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in ALLOWED_EXT:
@@ -69,6 +194,7 @@ def save_image(file: UploadFile, subfolder: str = "products") -> str:
                     detail=f"La imagen supera el límite de {MAX_IMAGE_SIZE_BYTES // (1024*1024)} MB",
                 )
             f.write(chunk)
+    os.chmod(filepath, 0o644)
 
     return f"/media/marketplace/{subfolder}/{filename}"
 
@@ -99,7 +225,50 @@ def save_video(file: UploadFile, subfolder: str = "products") -> str:
                     detail=f"El video supera el límite de {MAX_VIDEO_SIZE_BYTES // (1024*1024)} MB",
                 )
             f.write(chunk)
+    # 644, no el 600 por defecto — nginx (en el compose local, y cualquier
+    # reverse proxy que no corra como root) necesita poder LEER el archivo
+    # para servirlo; sin esto tira 403 aunque el archivo exista y esté bien.
+    os.chmod(filepath, 0o644)
 
     _remux_faststart(filepath)
 
+    # Streaming adaptativo (HLS) — si se genera bien, esa es la URL que se
+    # devuelve (el reproductor la detecta sola, sin cambios en la app). Si
+    # falla o no hay ffmpeg, se cae al .mp4 de siempre — el usuario nunca se
+    # queda sin video por un problema de transcodificación.
+    hls_dir = os.path.splitext(filepath)[0]
+    os.makedirs(hls_dir, exist_ok=True)
+    if _generate_hls(filepath, hls_dir):
+        name_without_ext = os.path.splitext(filename)[0]
+        return f"/media/marketplace/{subfolder}/videos/{name_without_ext}/master.m3u8"
+    shutil.rmtree(hls_dir, ignore_errors=True)
+
     return f"/media/marketplace/{subfolder}/videos/{filename}"
+
+
+def get_video_download_url(video_url: Optional[str]) -> Optional[str]:
+    """Dado el video_url guardado (el master.m3u8 de un HLS, o un .mp4
+    directo de antes de este cambio), devuelve la URL de un único archivo
+    descargable — el .mp4 original que se guarda como respaldo aunque el
+    reproductor use el HLS. Sirve para que el admin pueda "recuperar" el
+    video tal como lo subieron, sin depender de los fragmentos del stream."""
+    if not video_url:
+        return None
+    if not video_url.endswith("/master.m3u8"):
+        return video_url
+
+    hls_dir_url = video_url.rsplit("/", 1)[0]  # .../videos/{uuid}
+    if not hls_dir_url.startswith("/media/"):
+        return None
+    relative_dir = hls_dir_url[len("/media/"):]  # marketplace/.../videos/{uuid}
+    parent_relative = os.path.dirname(relative_dir)  # marketplace/.../videos
+    uuid_name = os.path.basename(relative_dir)
+    parent_fs = os.path.join(settings.media_base_path, parent_relative)
+    if not os.path.isdir(parent_fs):
+        return None
+
+    for fname in os.listdir(parent_fs):
+        stem, ext = os.path.splitext(fname)
+        if stem == uuid_name and ext.lower() in ALLOWED_VIDEO_EXT:
+            return f"/media/{parent_relative}/{fname}"
+    return None

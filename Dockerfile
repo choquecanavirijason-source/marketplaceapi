@@ -2,9 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Instalar dependencias del sistema
+# Instalar dependencias del sistema — ffmpeg para el remux/HLS de videos subidos
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Copiar y instalar requerimientos

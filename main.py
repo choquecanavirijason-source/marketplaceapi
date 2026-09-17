@@ -1,4 +1,14 @@
+import mimetypes
 import os
+
+# .ts es ambiguo (TypeScript / video) y muchos sistemas no lo registran como
+# video por defecto — sin esto, StaticFiles sirve los segmentos HLS como
+# text/plain y el reproductor nativo (ExoPlayer/AVPlayer) los rechaza en vez
+# de reproducirlos. Se registra ANTES de montar StaticFiles, a nivel de
+# proceso, así queda bien sin depender de que nginx esté delante (como en
+# producción) o no (como en local).
+mimetypes.add_type("video/mp2t", ".ts")
+mimetypes.add_type("application/vnd.apple.mpegurl", ".m3u8")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
