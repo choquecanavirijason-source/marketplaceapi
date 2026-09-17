@@ -77,9 +77,10 @@ HLS_RENDITIONS = [
 #     nitidez (resolución y bits por pixel ambos muy bajos).
 #   720px/CRF25/1100kbps -> confirmado en el celular real, fluido y buena
 #     calidad.
-#   720px/CRF23/1400kbps -> también confirmado fluido sin cortes. Se sube
-#     un escalón más de bits (mismo max_dim) mientras siga aguantando.
-REEL_RENDITION = {"max_dim": 720, "crf": "21", "v_maxrate": "1800k", "v_bufsize": "2800k", "a_bitrate": "128k"}
+#   720px/CRF23/1400kbps -> también confirmado fluido sin cortes.
+# Ahora se prueba subir la resolución (no solo los bits) a ver hasta dónde
+# aguanta antes de volver a tironear.
+REEL_RENDITION = {"max_dim": 900, "crf": "21", "v_maxrate": "1800k", "v_bufsize": "2800k", "a_bitrate": "128k"}
 
 
 def _is_hdr_source(source_path: str) -> bool:
