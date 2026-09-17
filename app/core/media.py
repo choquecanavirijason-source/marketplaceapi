@@ -67,6 +67,16 @@ HLS_RENDITIONS = [
     {"name": "high", "max_dim": 1920, "crf": "18", "v_maxrate": "4000k", "v_bufsize": "6000k", "a_bitrate": "160k", "bandwidth": 4300000},
 ]
 
+# Reels no usan streaming adaptativo (single MP4, ver _compress_single_video)
+# — a diferencia de HLS, acá no hay una calidad "low" a la que el
+# reproductor pueda bajar solo si la conexión no da abasto: esta es la
+# ÚNICA calidad que se sirve. Usar la misma que "high" (pensada para
+# tutoriales vistos con wifi) dejaba archivos de 1920px/CRF18/hasta 4000kbps
+# — en datos móviles con la latencia hacia el VPS (EU) eso tarda en bajar y
+# el reproductor se queda sin buffer (se corta). 1080px/CRF24/1800kbps pesa
+# bastante menos manteniendo buena calidad en pantalla de celular.
+REEL_RENDITION = {"max_dim": 1080, "crf": "24", "v_maxrate": "1800k", "v_bufsize": "2800k", "a_bitrate": "128k"}
+
 
 def _is_hdr_source(source_path: str) -> bool:
     """Detecta si el video de origen es HDR (HLG o PQ/HDR10) — típico del
@@ -189,12 +199,13 @@ def _compress_single_video(source_path: str, output_path: str) -> bool:
     de bajar completo (rápido, siendo corto), adelantar/atrasar es
     instantáneo siempre — cero pedidos de red de por medio.
 
-    Reusa la misma calidad "high" del array HLS_RENDITIONS y las mismas
-    correcciones (HDR->SDR, dimensiones pares, fps constante)."""
+    Usa REEL_RENDITION (más liviana que "high" de HLS_RENDITIONS, ver su
+    comentario) y las mismas correcciones (HDR->SDR, dimensiones pares, fps
+    constante)."""
     if not shutil.which("ffmpeg"):
         return False
     is_hdr = _is_hdr_source(source_path)
-    rendition = HLS_RENDITIONS[-1]  # "high" — única calidad, se baja entera igual
+    rendition = REEL_RENDITION
     scale = f"scale='min({rendition['max_dim']},iw)':'min({rendition['max_dim']},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
     if is_hdr:
         video_filter = (
