@@ -58,11 +58,13 @@ def _remux_faststart(filepath: str) -> None:
 # y le faltan en escenas con movimiento, perdiendo nitidez ahí), se le pide
 # "mantené esta calidad visual" y usa los bits que haga falta. crf 18 es
 # considerado "visualmente sin pérdida" para H.264. v_maxrate/v_bufsize
-# quedan solo como techo de seguridad (necesario para streaming), no como
-# objetivo — por eso están generosos, para que casi nunca lo limiten.
+# quedan solo como techo de seguridad (necesario para streaming) — no bajan
+# la calidad real (eso lo sigue haciendo el CRF), pero si quedan demasiado
+# altos, en datos móviles el reproductor tarda en juntar buffer y se nota
+# como "carga lenta" aunque la conexión no sea tan mala.
 HLS_RENDITIONS = [
-    {"name": "low", "max_dim": 720, "crf": "23", "v_maxrate": "2000k", "v_bufsize": "3000k", "a_bitrate": "128k", "bandwidth": 2200000},
-    {"name": "high", "max_dim": 1920, "crf": "18", "v_maxrate": "8000k", "v_bufsize": "12000k", "a_bitrate": "192k", "bandwidth": 8300000},
+    {"name": "low", "max_dim": 720, "crf": "23", "v_maxrate": "1500k", "v_bufsize": "2200k", "a_bitrate": "128k", "bandwidth": 1700000},
+    {"name": "high", "max_dim": 1920, "crf": "18", "v_maxrate": "4000k", "v_bufsize": "6000k", "a_bitrate": "160k", "bandwidth": 4300000},
 ]
 
 
@@ -134,14 +136,23 @@ def _generate_hls(source_path: str, out_dir: str) -> bool:
                     # necesidad (el bug real que rompía la reproducción era
                     # otro: color HDR y ancho impar, ya arreglados aparte).
                     "-fps_mode", "cfr",
-                    # "slow" (no "veryfast"): mucho mejor calidad por cada bit
-                    # de bitrate — tarda más en convertir, pero ya tenemos la
-                    # barra de "procesando" en el admin para eso.
-                    "-c:v", "libx264", "-preset", "slow",
+                    # "medium" (no "slow"): el VPS de producción es bastante
+                    # más lento que una PC de desarrollo — con "slow" tardaba
+                    # más de 5 minutos y el timeout del proxy cortaba antes
+                    # de terminar (el video se terminaba de crear igual, pero
+                    # ya se había mostrado el error). "medium" es notablemente
+                    # más rápido con una pérdida de calidad mínima (el CRF
+                    # sigue siendo el que manda la calidad real, esto solo
+                    # afecta qué tan a fondo busca la mejor compresión).
+                    "-c:v", "libx264", "-preset", "medium",
                     "-crf", rendition["crf"], "-maxrate", rendition["v_maxrate"], "-bufsize", rendition["v_bufsize"],
                     "-g", "48", "-keyint_min", "48", "-sc_threshold", "0",
                     "-c:a", "aac", "-b:a", rendition["a_bitrate"], "-ac", "2",
-                    "-f", "hls", "-hls_time", "4", "-hls_playlist_type", "vod",
+                    # hls_time 2 (no 4): segmentos más chicos -> arranca a
+                    # reproducir más rápido (no espera a bajar un pedazo tan
+                    # grande antes del primer frame), a costa de un poco más
+                    # de overhead por tener más archivos.
+                    "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "vod",
                     "-hls_flags", "independent_segments",
                     "-hls_segment_filename", os.path.join(out_dir, f"{rendition['name']}_%03d.ts"),
                     os.path.join(out_dir, f"{rendition['name']}.m3u8"),
