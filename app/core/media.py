@@ -70,13 +70,14 @@ HLS_RENDITIONS = [
 # Reels no usan streaming adaptativo (single MP4, ver _compress_single_video)
 # — a diferencia de HLS, acá no hay una calidad "low" a la que el
 # reproductor pueda bajar solo si la conexión no da abasto: esta es la
-# ÚNICA calidad que se sirve. Ya se bajó una vez de "high" (1920px/CRF18/
-# 4000kbps) a 1080p/CRF24/1800kbps y en datos móviles seguía tardando
-# demasiado en bufferear (el reproductor se queda sin buffer y el video se
-# ve "a tirones" aunque una vez cargado del todo se reproduce fluido). Bajar
-# más agresivo: 640px/CRF27/700kbps — para contenido corto tipo reel visto
-# en el celular, prioriza que cargue fluido por sobre la nitidez máxima.
-REEL_RENDITION = {"max_dim": 640, "crf": "27", "v_maxrate": "700k", "v_bufsize": "1200k", "a_bitrate": "96k"}
+# ÚNICA calidad que se sirve. Historial de ajustes en esta VPS/conexión:
+#   1080p/CRF24/1800kbps -> cargaba fluido pero tardaba demasiado en
+#     bufferear en datos móviles ("a tirones" mientras carga).
+#   640px/CRF27/700kbps  -> carga fluida, pero se ve pixelado/con poca
+#     nitidez (resolución y bits por pixel ambos muy bajos).
+# Punto medio: algo más de resolución y de bitrate que 640/700k, bastante
+# menos que 1080/1800k — a probar si esto ya da un balance aceptable.
+REEL_RENDITION = {"max_dim": 720, "crf": "25", "v_maxrate": "1100k", "v_bufsize": "1800k", "a_bitrate": "96k"}
 
 
 def _is_hdr_source(source_path: str) -> bool:
