@@ -179,6 +179,59 @@ def _generate_hls(source_path: str, out_dir: str) -> bool:
         return False
 
 
+def _compress_single_video(source_path: str, output_path: str) -> bool:
+    """Recodifica a un único MP4 bien comprimido, SIN trocear en HLS.
+
+    Para reels (típicamente cortos, 15-40s): con HLS, saltar hacia atrás en
+    la barra de progreso podía obligar a rebufferear el nuevo segmento —
+    sin ningún indicador de carga en pantalla, se sentía como si el video
+    se hubiera recargado entero. Con un solo archivo, una vez que termina
+    de bajar completo (rápido, siendo corto), adelantar/atrasar es
+    instantáneo siempre — cero pedidos de red de por medio.
+
+    Reusa la misma calidad "high" del array HLS_RENDITIONS y las mismas
+    correcciones (HDR->SDR, dimensiones pares, fps constante)."""
+    if not shutil.which("ffmpeg"):
+        return False
+    is_hdr = _is_hdr_source(source_path)
+    rendition = HLS_RENDITIONS[-1]  # "high" — única calidad, se baja entera igual
+    scale = f"scale='min({rendition['max_dim']},iw)':'min({rendition['max_dim']},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
+    if is_hdr:
+        video_filter = (
+            "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+            "tonemap=tonemap=hable:desat=0,"
+            f"zscale=t=bt709:m=bt709:r=tv,format=yuv420p,{scale}"
+        )
+    else:
+        video_filter = scale
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", source_path,
+                "-vf", video_filter,
+                "-pix_fmt", "yuv420p",
+                "-fps_mode", "cfr",
+                "-c:v", "libx264", "-preset", "medium",
+                "-crf", rendition["crf"], "-maxrate", rendition["v_maxrate"], "-bufsize", rendition["v_bufsize"],
+                "-c:a", "aac", "-b:a", rendition["a_bitrate"], "-ac", "2",
+                "-movflags", "+faststart",
+                output_path,
+            ],
+            capture_output=True,
+            timeout=600,
+        )
+        if result.returncode != 0:
+            print(
+                f"[_compress_single_video] ffmpeg falló (source={source_path}): "
+                f"{result.stderr.decode(errors='replace')[-2000:]}"
+            )
+            return False
+        return os.path.getsize(output_path) > 0
+    except Exception as exc:
+        print(f"[_compress_single_video] excepción para {source_path}: {exc!r}")
+        return False
+
+
 def save_image(file: UploadFile, subfolder: str = "products") -> str:
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in ALLOWED_EXT:
@@ -243,10 +296,31 @@ def save_video(file: UploadFile, subfolder: str = "products") -> str:
 
     _remux_faststart(filepath)
 
-    # Streaming adaptativo (HLS) — si se genera bien, esa es la URL que se
-    # devuelve (el reproductor la detecta sola, sin cambios en la app). Si
-    # falla o no hay ffmpeg, se cae al .mp4 de siempre — el usuario nunca se
-    # queda sin video por un problema de transcodificación.
+    if subfolder == "reels":
+        # Reels: un solo archivo bien comprimido, SIN HLS — son cortos, así
+        # que una vez bajado completo el seek es instantáneo siempre (sin
+        # pedidos de red a mitad de reproducción). Con HLS, saltar hacia
+        # atrás podía rebufferear y sentirse como una recarga completa.
+        name_without_ext = os.path.splitext(filename)[0]
+        target_path = os.path.join(folder, f"{name_without_ext}.mp4")
+        fd, tmp_path = tempfile.mkstemp(suffix=".mp4", dir=folder)
+        os.close(fd)
+        if _compress_single_video(filepath, tmp_path):
+            os.replace(tmp_path, target_path)
+            os.chmod(target_path, 0o644)
+            if filepath != target_path:
+                os.remove(filepath)
+            return f"/media/marketplace/{subfolder}/videos/{name_without_ext}.mp4"
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        # Si falla la compresión (o no hay ffmpeg), se sirve el original tal
+        # cual se subió — ya con faststart, aunque sin la recompresión.
+        return f"/media/marketplace/{subfolder}/videos/{filename}"
+
+    # Productos (tutoriales) — pueden ser más largos, ahí streaming
+    # adaptativo (HLS) sigue teniendo sentido: si se genera bien, esa es la
+    # URL que se devuelve (el reproductor la detecta sola). Si falla o no
+    # hay ffmpeg, se cae al .mp4 de siempre.
     hls_dir = os.path.splitext(filepath)[0]
     os.makedirs(hls_dir, exist_ok=True)
     if _generate_hls(filepath, hls_dir):
