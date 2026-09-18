@@ -317,6 +317,11 @@ def save_video(file: UploadFile, subfolder: str = "products") -> str:
         # que una vez bajado completo el seek es instantáneo siempre (sin
         # pedidos de red a mitad de reproducción). Con HLS, saltar hacia
         # atrás podía rebufferear y sentirse como una recarga completa.
+        if settings.skip_reel_compression:
+            # Prueba temporal: sube el archivo tal cual (solo faststart, sin
+            # recodificar) para medir cuánto del "se traba" es la
+            # recompresión en sí vs. la red/latencia hacia el VPS.
+            return f"/media/marketplace/{subfolder}/videos/{filename}"
         name_without_ext = os.path.splitext(filename)[0]
         target_path = os.path.join(folder, f"{name_without_ext}.mp4")
         fd, tmp_path = tempfile.mkstemp(suffix=".mp4", dir=folder)
