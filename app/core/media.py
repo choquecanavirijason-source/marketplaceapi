@@ -67,10 +67,11 @@ HLS_RENDITIONS = [
     {"name": "high", "max_dim": 1920, "crf": "18", "v_maxrate": "4000k", "v_bufsize": "6000k", "a_bitrate": "160k", "bandwidth": 4300000},
 ]
 
-# Reels no usan streaming adaptativo (single MP4, ver _compress_single_video)
-# — a diferencia de HLS, acá no hay una calidad "low" a la que el
-# reproductor pueda bajar solo si la conexión no da abasto: esta es la
-# ÚNICA calidad que se sirve. Historial de ajustes en esta VPS/conexión:
+# NO SE USA ACTUALMENTE (ver save_video más abajo): era la calidad del
+# single-MP4 que usaban los reels antes de volver a probar HLS para ellos.
+# Se deja sin borrar por si hay que volver atrás rápido a single-MP4 si el
+# reintento de HLS no anda bien. Historial de ajustes probados en esta
+# VPS/conexión, de más liviano a más pesado:
 #   1080p/CRF24/1800kbps -> cargaba fluido pero tardaba demasiado en
 #     bufferear en datos móviles ("a tirones" mientras carga).
 #   640px/CRF27/700kbps  -> carga fluida, pero se ve pixelado/con poca
@@ -313,36 +314,14 @@ def save_video(file: UploadFile, subfolder: str = "products") -> str:
 
     _remux_faststart(filepath)
 
-    if subfolder == "reels":
-        # Reels: un solo archivo bien comprimido, SIN HLS — son cortos, así
-        # que una vez bajado completo el seek es instantáneo siempre (sin
-        # pedidos de red a mitad de reproducción). Con HLS, saltar hacia
-        # atrás podía rebufferear y sentirse como una recarga completa.
-        if settings.skip_reel_compression:
-            # Prueba temporal: sube el archivo tal cual (solo faststart, sin
-            # recodificar) para medir cuánto del "se traba" es la
-            # recompresión en sí vs. la red/latencia hacia el VPS.
-            return f"/media/marketplace/{subfolder}/videos/{filename}"
-        name_without_ext = os.path.splitext(filename)[0]
-        target_path = os.path.join(folder, f"{name_without_ext}.mp4")
-        fd, tmp_path = tempfile.mkstemp(suffix=".mp4", dir=folder)
-        os.close(fd)
-        if _compress_single_video(filepath, tmp_path):
-            os.replace(tmp_path, target_path)
-            os.chmod(target_path, 0o644)
-            if filepath != target_path:
-                os.remove(filepath)
-            return f"/media/marketplace/{subfolder}/videos/{name_without_ext}.mp4"
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        # Si falla la compresión (o no hay ffmpeg), se sirve el original tal
-        # cual se subió — ya con faststart, aunque sin la recompresión.
-        return f"/media/marketplace/{subfolder}/videos/{filename}"
-
-    # Productos (tutoriales) — pueden ser más largos, ahí streaming
-    # adaptativo (HLS) sigue teniendo sentido: si se genera bien, esa es la
-    # URL que se devuelve (el reproductor la detecta sola). Si falla o no
-    # hay ffmpeg, se cae al .mp4 de siempre.
+    # Reels y productos usan el mismo streaming adaptativo (HLS): el
+    # reproductor pide de a segmentos y sube/baja de calidad sola según la
+    # velocidad real de descarga. Antes los reels usaban un solo MP4
+    # (_compress_single_video, ver más abajo) para evitar que un seek hacia
+    # atrás rebuffereara — se vuelve a probar HLS ahora que además se
+    # arregló la contención de ancho de banda (precarga del reel siguiente)
+    # y se agregó un indicador visual de buffering, que eran factores que
+    # antes empeoraban esa sensación de "recarga".
     hls_dir = os.path.splitext(filepath)[0]
     os.makedirs(hls_dir, exist_ok=True)
     if _generate_hls(filepath, hls_dir):
