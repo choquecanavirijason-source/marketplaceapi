@@ -77,10 +77,11 @@ HLS_RENDITIONS = [
 #     nitidez (resolución y bits por pixel ambos muy bajos).
 #   720px/CRF25/1100kbps -> confirmado en el celular real, fluido y buena
 #     calidad.
-#   720px/CRF23/1400kbps -> también confirmado fluido sin cortes. Este es
-#     el techo real por ahora: 900px/CRF21/1800kbps (probado después) volvió
-#     a laguear, así que se vuelve a este último valor que sí anduvo bien.
-REEL_RENDITION = {"max_dim": 720, "crf": "23", "v_maxrate": "1400k", "v_bufsize": "2200k", "a_bitrate": "112k"}
+#   720px/CRF23/1400kbps -> también confirmado fluido sin cortes.
+#   900px/CRF21/1800kbps -> volvió a laguear, ese salto fue demasiado grande.
+# Paso más chico esta vez: 800px (no 900) con el mismo bitrate que ya
+# anduvo bien, a ver si el salto de resolución más moderado sigue fluido.
+REEL_RENDITION = {"max_dim": 800, "crf": "23", "v_maxrate": "1400k", "v_bufsize": "2200k", "a_bitrate": "112k"}
 
 
 def _is_hdr_source(source_path: str) -> bool:
