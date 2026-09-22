@@ -1,15 +1,38 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: marketplace-postgres
+    environment:
+      POSTGRES_DB: marketplace
+      POSTGRES_USER: marketplace
+      POSTGRES_PASSWORD: marketplace
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marketplace -d marketplace"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
   marketplace-api:
     build: .
     container_name: marketplace-api
     ports:
       - "8001:8001"
     env_file: .env
+    environment:
+      # Dentro de Compose, el hostname de PostgreSQL es el nombre del servicio: postgres.
+      DATABASE_URL: postgresql+psycopg://marketplace:marketplace@postgres:5432/marketplace
     volumes:
       - ./media:/app/media
       - ./data:/app/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/docs"]
@@ -18,8 +41,8 @@ services:
       retries: 3
       start_period: 40s
 
-  # SOLO desarrollo local — replica cómo producción sirve /media/ con soporte
-  # de Range real (nginx), que Starlette/FastAPI no tiene. Ver nginx.local.conf.
+  # SOLO desarrollo local — replica cómo producción sirve /media/
+  # con soporte de Range real (nginx), que Starlette/FastAPI no tiene.
   nginx-local:
     image: nginx:alpine
     container_name: marketplace-nginx-local
@@ -31,3 +54,6 @@ services:
     depends_on:
       - marketplace-api
     restart: unless-stopped
+
+volumes:
+  postgres-data:

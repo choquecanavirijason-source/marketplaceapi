@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    database_url: str = "sqlite:///./marketplace.db"
+    database_url: str = "postgresql+psycopg://marketplace:marketplace@postgres:5432/marketplace"
     salon_backend_url: str = "http://localhost:8000"
     media_base_path: str = "./media"
     allowed_origins: str = "*"

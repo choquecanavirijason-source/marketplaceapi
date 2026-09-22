@@ -30,7 +30,7 @@ ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8080,http://34.55.150.142
 
 ### 1️⃣ Configurar variables de entorno
 ```bash
-cp .env.example .env
+copy .env.example .env
 # Edita .env si es necesario
 ```
 
@@ -68,12 +68,15 @@ app/
 
 ## 🗄️ Base de Datos
 
-MySQL 8.0 con migraciones automáticas al iniciar.
+PostgreSQL 16 con migraciones automáticas al iniciar.
 
-**Credenciales por defecto** (modificar en .env):
-- Usuario: `root`
-- Contraseña: `password`
+**PostgreSQL en Docker Compose**:
+- Imagen: `postgres:16-alpine`
+- Host dentro de Compose: `postgres`
+- Usuario: `marketplace`
+- Contraseña: `marketplace`
 - Database: `marketplace`
+- URL usada por el backend: `postgresql+psycopg://marketplace:marketplace@postgres:5432/marketplace`
 
 ---
 
