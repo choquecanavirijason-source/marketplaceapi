@@ -3,11 +3,11 @@ import shutil
 import subprocess
 import tempfile
 import uuid
-from typing import Optional
+from typing import Optional, Set, Tuple
 
 from fastapi import HTTPException, UploadFile
 
-from app.config.settings import settings
+from app.core import storage
 
 ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 ALLOWED_VIDEO_EXT = {".mp4", ".mov", ".webm", ".m4v"}
@@ -250,35 +250,33 @@ def _compress_single_video(source_path: str, output_path: str) -> bool:
         return False
 
 
+def _write_upload(file: UploadFile, dest_path: str, max_bytes: int, label: str) -> None:
+    """Escribe el upload por chunks y corta apenas se supera el límite, en
+    vez de leer el archivo completo a memoria."""
+    size = 0
+    with open(dest_path, "wb") as f:
+        while chunk := file.file.read(1024 * 1024):
+            size += len(chunk)
+            if size > max_bytes:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{label} supera el límite de {max_bytes // (1024*1024)} MB",
+                )
+            f.write(chunk)
+
+
 def save_image(file: UploadFile, subfolder: str = "products") -> str:
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in ALLOWED_EXT:
         raise HTTPException(status_code=400, detail=f"Formato no permitido. Usa: {', '.join(ALLOWED_EXT)}")
 
-    folder = os.path.join(settings.media_base_path, "marketplace", subfolder)
-    os.makedirs(folder, exist_ok=True)
-
     filename = f"{uuid.uuid4().hex}{ext}"
-    filepath = os.path.join(folder, filename)
-
-    # Igual que save_video: se escribe por chunks para poder cortar apenas
-    # se supera el límite, en vez de leer el archivo completo a memoria
-    # (antes no había ningún límite de tamaño para imágenes).
-    size = 0
-    with open(filepath, "wb") as f:
-        while chunk := file.file.read(1024 * 1024):
-            size += len(chunk)
-            if size > MAX_IMAGE_SIZE_BYTES:
-                f.close()
-                os.remove(filepath)
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"La imagen supera el límite de {MAX_IMAGE_SIZE_BYTES // (1024*1024)} MB",
-                )
-            f.write(chunk)
-    os.chmod(filepath, 0o644)
-
-    return f"/media/marketplace/{subfolder}/{filename}"
+    key = f"marketplace/{subfolder}/{filename}"
+    with tempfile.TemporaryDirectory() as work:
+        local_path = os.path.join(work, filename)
+        _write_upload(file, local_path, MAX_IMAGE_SIZE_BYTES, "La imagen")
+        storage.put_file(local_path, key)
+    return storage.public_url(key)
 
 
 def save_video(file: UploadFile, subfolder: str = "products") -> str:
@@ -289,72 +287,87 @@ def save_video(file: UploadFile, subfolder: str = "products") -> str:
             detail=f"Formato de video no permitido. Usa: {', '.join(ALLOWED_VIDEO_EXT)}",
         )
 
-    folder = os.path.join(settings.media_base_path, "marketplace", subfolder, "videos")
-    os.makedirs(folder, exist_ok=True)
+    name = uuid.uuid4().hex
+    filename = f"{name}{ext}"
+    videos_key = f"marketplace/{subfolder}/videos"
 
-    filename = f"{uuid.uuid4().hex}{ext}"
-    filepath = os.path.join(folder, filename)
+    # ffmpeg necesita archivos locales: se procesa todo en una carpeta
+    # temporal y recién al final se manda al storage (disco o MinIO).
+    with tempfile.TemporaryDirectory() as work:
+        filepath = os.path.join(work, filename)
+        _write_upload(file, filepath, MAX_VIDEO_SIZE_BYTES, "El video")
+        _remux_faststart(filepath)
 
-    size = 0
-    with open(filepath, "wb") as f:
-        while chunk := file.file.read(1024 * 1024):
-            size += len(chunk)
-            if size > MAX_VIDEO_SIZE_BYTES:
-                f.close()
-                os.remove(filepath)
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"El video supera el límite de {MAX_VIDEO_SIZE_BYTES // (1024*1024)} MB",
-                )
-            f.write(chunk)
-    # 644, no el 600 por defecto — nginx (en el compose local, y cualquier
-    # reverse proxy que no corra como root) necesita poder LEER el archivo
-    # para servirlo; sin esto tira 403 aunque el archivo exista y esté bien.
-    os.chmod(filepath, 0o644)
+        # Reels y productos usan streaming adaptativo (HLS): el reproductor
+        # pide de a segmentos y sube/baja de calidad según la velocidad real.
+        # El .mp4 original se guarda igual, como respaldo descargable.
+        hls_dir = os.path.join(work, name)
+        os.makedirs(hls_dir)
+        hls_ok = _generate_hls(filepath, hls_dir)
+        if hls_ok:
+            storage.put_dir(hls_dir, f"{videos_key}/{name}", last="master.m3u8")
+        storage.put_file(filepath, f"{videos_key}/{filename}")
 
-    _remux_faststart(filepath)
-
-    # Reels y productos usan el mismo streaming adaptativo (HLS): el
-    # reproductor pide de a segmentos y sube/baja de calidad sola según la
-    # velocidad real de descarga. Antes los reels usaban un solo MP4
-    # (_compress_single_video, ver más abajo) para evitar que un seek hacia
-    # atrás rebuffereara — se vuelve a probar HLS ahora que además se
-    # arregló la contención de ancho de banda (precarga del reel siguiente)
-    # y se agregó un indicador visual de buffering, que eran factores que
-    # antes empeoraban esa sensación de "recarga".
-    hls_dir = os.path.splitext(filepath)[0]
-    os.makedirs(hls_dir, exist_ok=True)
-    if _generate_hls(filepath, hls_dir):
-        name_without_ext = os.path.splitext(filename)[0]
-        return f"/media/marketplace/{subfolder}/videos/{name_without_ext}/master.m3u8"
-    shutil.rmtree(hls_dir, ignore_errors=True)
-
-    return f"/media/marketplace/{subfolder}/videos/{filename}"
+    if hls_ok:
+        return storage.public_url(f"{videos_key}/{name}/master.m3u8")
+    return storage.public_url(f"{videos_key}/{filename}")
 
 
 def get_video_download_url(video_url: Optional[str]) -> Optional[str]:
     """Dado el video_url guardado (el master.m3u8 de un HLS, o un .mp4
-    directo de antes de este cambio), devuelve la URL de un único archivo
-    descargable — el .mp4 original que se guarda como respaldo aunque el
-    reproductor use el HLS. Sirve para que el admin pueda "recuperar" el
-    video tal como lo subieron, sin depender de los fragmentos del stream."""
+    directo de antes de HLS), devuelve la URL del .mp4 original que se
+    guarda como respaldo, para que el admin pueda descargar el video tal
+    como lo subieron."""
     if not video_url:
         return None
     if not video_url.endswith("/master.m3u8"):
         return video_url
 
-    hls_dir_url = video_url.rsplit("/", 1)[0]  # .../videos/{uuid}
+    hls_dir_url = video_url.rsplit("/", 1)[0]  # /media/.../videos/{uuid}
     if not hls_dir_url.startswith("/media/"):
         return None
-    relative_dir = hls_dir_url[len("/media/"):]  # marketplace/.../videos/{uuid}
-    parent_relative = os.path.dirname(relative_dir)  # marketplace/.../videos
-    uuid_name = os.path.basename(relative_dir)
-    parent_fs = os.path.join(settings.media_base_path, parent_relative)
-    if not os.path.isdir(parent_fs):
-        return None
-
-    for fname in os.listdir(parent_fs):
-        stem, ext = os.path.splitext(fname)
-        if stem == uuid_name and ext.lower() in ALLOWED_VIDEO_EXT:
-            return f"/media/{parent_relative}/{fname}"
+    # El original vive al lado de la carpeta HLS: .../videos/{uuid}.<ext>
+    for key in storage.list_keys(hls_dir_url[len("/media/"):] + "."):
+        if os.path.splitext(key)[1].lower() in ALLOWED_VIDEO_EXT:
+            return storage.public_url(key)
     return None
+
+
+MANAGED_MEDIA_PREFIX = "/media/marketplace/"
+
+
+def is_managed_media(url: Optional[str]) -> bool:
+    """True solo para archivos que subió este backend. Links externos o
+    rutas de otro backend (ej. productos importados del salón) no se tocan."""
+    return bool(url) and url.startswith(MANAGED_MEDIA_PREFIX)
+
+
+def media_storage_keys(url: str) -> Tuple[Set[str], Set[str]]:
+    """(claves exactas, prefijos) que ocupa en el storage un archivo publicado.
+    Un HLS es su carpeta de segmentos más el .mp4 original de respaldo."""
+    key = url[len("/media/"):]
+    if key.endswith("/master.m3u8"):
+        hls_dir = key.rsplit("/", 1)[0]
+        return set(), {hls_dir + "/", hls_dir + "."}
+    return {key}, set()
+
+
+def delete_media(*urls: str) -> None:
+    """Borra del storage los archivos de cada URL. Si algo falla solo se
+    registra: el registro ya se guardó y un archivo huérfano no rompe nada
+    (lo levanta después el comando de limpieza)."""
+    for url in urls:
+        if not is_managed_media(url):
+            continue
+        try:
+            keys, prefixes = media_storage_keys(url)
+            for key in keys:
+                storage.delete_key(key)
+            for prefix in prefixes:
+                if prefix.endswith("/"):
+                    storage.delete_prefix(prefix)
+                else:
+                    for key in storage.list_keys(prefix):
+                        storage.delete_key(key)
+        except Exception as exc:
+            print(f"[delete_media] no se pudo borrar {url}: {exc!r}")

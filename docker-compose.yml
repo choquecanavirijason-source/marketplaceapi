@@ -5,11 +5,24 @@ services:
     ports:
       - "8001:8001"
     env_file: .env
+    environment:
+      # La base SQLite va en ./data (volumen): si quedaba en /app, cada
+      # rebuild del contenedor la reemplazaba y se perdían los datos.
+      DATABASE_URL: sqlite:////app/data/marketplace.db
+      STORAGE_BACKEND: minio
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-elashes}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-elashes-dev-secret}
+      MINIO_BUCKET: marketplace-media
+      MEDIA_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL:-http://localhost:8003/media}
     volumes:
       - ./media:/app/media
       - ./data:/app/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/docs"]
@@ -18,8 +31,63 @@ services:
       retries: 3
       start_period: 40s
 
-  # SOLO desarrollo local — replica cómo producción sirve /media/ con soporte
-  # de Range real (nginx), que Starlette/FastAPI no tiene. Ver nginx.local.conf.
+  # Storage de archivos (reels, imágenes) compatible con S3. pgsty/minio es
+  # el fork comunitario de MinIO: MinIO Inc. dejó de publicar imágenes
+  # gratuitas en Docker Hub y quay.io.
+  # Consola web: http://localhost:9001 (usuario/clave de MINIO_ROOT_*).
+  minio:
+    image: pgsty/minio:latest
+    container_name: marketplace-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-elashes}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-elashes-dev-secret}
+    volumes:
+      - ./minio-data:/data
+    restart: unless-stopped
+
+  # Crea el bucket y le da lectura pública SOLO de archivos (s3:GetObject).
+  # No se usa "mc anonymous set download" porque ese permiso también deja
+  # listar el bucket entero. Corre una vez en cada `up` y termina.
+  minio-init:
+    image: pgsty/mc:latest
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-elashes}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-elashes-dev-secret}
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do sleep 1; done &&
+      mc mb --ignore-existing local/marketplace-media &&
+      echo '{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":[\"*\"]},\"Action\":[\"s3:GetObject\"],\"Resource\":[\"arn:aws:s3:::marketplace-media/*\"]}]}' > /tmp/public-read.json &&
+      mc anonymous set-json /tmp/public-read.json local/marketplace-media
+      "
+
+  # Migración única de los archivos que ya estaban en ./media al bucket:
+  #   docker compose run --rm minio-migrate
+  minio-migrate:
+    image: pgsty/mc:latest
+    profiles: ["migrate"]
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-elashes}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-elashes-dev-secret}
+    volumes:
+      - ./media:/seed:ro
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+      mc mirror --overwrite /seed local/marketplace-media
+      "
+
+  # SOLO desarrollo local — replica cómo producción sirve /media/ (nginx con
+  # Range real). Ver nginx.local.conf.
   nginx-local:
     image: nginx:alpine
     container_name: marketplace-nginx-local
@@ -27,7 +95,7 @@ services:
       - "8003:80"
     volumes:
       - ./nginx.local.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./media:/media:ro
     depends_on:
       - marketplace-api
+      - minio
     restart: unless-stopped
