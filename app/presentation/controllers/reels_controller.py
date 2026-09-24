@@ -80,10 +80,13 @@ def _load(
     active_only: bool = False,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
+    ids: Optional[list[int]] = None,
 ):
     q = db.query(Reel).options(joinedload(Reel.product))
     if active_only:
         q = q.filter(Reel.is_active == True)
+    if ids is not None:
+        q = q.filter(Reel.id.in_(ids))
     q = q.order_by(Reel.sort_order, Reel.id)
     if offset is not None:
         q = q.offset(offset)
@@ -98,15 +101,19 @@ def _load(
 def list_reels(
     limit: Optional[int] = None,
     offset: int = 0,
+    ids: Optional[str] = None,
     db: Session = Depends(get_db),
     current_customer: Optional[Customer] = Depends(get_current_customer_optional),
 ):
     """Reels activos para la pantalla de reels de la app, ya ordenados.
 
     Soporta paginación (limit/offset) para no cargar todos los videos de golpe.
+    `ids` ("3,7,9") trae solo esos reels: la app lo usa para sumar los reels
+    nuevos sin recargar la lista entera.
     Incluye like_count siempre, e is_liked si hay sesión iniciada.
     """
-    reels = _load(db, active_only=True, limit=limit, offset=offset)
+    id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()] if ids else None
+    reels = _load(db, active_only=True, limit=limit, offset=offset, ids=id_list)
     ids = [r.id for r in reels]
     counts = _like_counts(db, ids)
     liked = _liked_reel_ids(db, current_customer.id if current_customer else None, ids)
@@ -114,6 +121,19 @@ def list_reels(
         _to_dict(r, like_count=counts.get(r.id, 0), is_liked=r.id in liked)
         for r in reels
     ]
+
+
+@router.get("/ids")
+def list_reel_ids(db: Session = Depends(get_db)):
+    """Ids de los reels activos, en orden. Consulta liviana para que la app
+    detecte reels nuevos o eliminados sin bajar la lista completa."""
+    rows = (
+        db.query(Reel.id)
+        .filter(Reel.is_active == True)
+        .order_by(Reel.sort_order, Reel.id)
+        .all()
+    )
+    return [reel_id for (reel_id,) in rows]
 
 
 @router.get("/liked")
