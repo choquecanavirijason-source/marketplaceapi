@@ -16,6 +16,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config.settings import settings
+from app.core import storage
 
 # ── Migrations ────────────────────────────────────────────────
 import app.infrastructure.database.migrations.create_categories_table   as m1
@@ -107,8 +108,17 @@ for name, fn in MIGRATIONS:
 run_seeders()
 
 # ── Static media ──────────────────────────────────────────────
-os.makedirs(settings.media_base_path, exist_ok=True)
-app.mount("/media", StaticFiles(directory=settings.media_base_path), name="media")
+if storage.use_minio():
+    # Los archivos viven en MinIO: quien pida /media/... directo al backend
+    # (ej. el admin vía /marketplace-proxy) se redirige a la URL pública.
+    @app.get("/media/{path:path}", include_in_schema=False)
+    def media_redirect(path: str):
+        return RedirectResponse(
+            f"{settings.media_public_base_url.rstrip('/')}/{path}", status_code=307
+        )
+else:
+    os.makedirs(settings.media_base_path, exist_ok=True)
+    app.mount("/media", StaticFiles(directory=settings.media_base_path), name="media")
 
 # ── Routers ───────────────────────────────────────────────────
 PREFIX = "/api"

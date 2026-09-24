@@ -1,12 +1,13 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.dependencies import get_db, get_admin_user
 from app.core.media import get_video_download_url, save_image, save_video
+from app.core.media_usage import discard_media
 from app.domain.entities.customer import Customer
 from app.domain.entities.reel import Reel
 from app.domain.entities.reel_like import ReelLike
@@ -241,12 +242,14 @@ async def update_reel(
     is_active: Optional[bool] = Form(None),
     video: Optional[UploadFile] = File(None),
     thumbnail: Optional[UploadFile] = File(None),
+    background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db),
     _=Depends(get_admin_user),
 ):
     reel = db.query(Reel).filter(Reel.id == reel_id).first()
     if not reel:
         raise HTTPException(status_code=404, detail="Reel no encontrado")
+    old_media = (reel.video_url, reel.thumbnail_url)
 
     if video and video.filename:      reel.video_url = await run_in_threadpool(save_video, video, "reels")
     elif video_url is not None:       reel.video_url = video_url or reel.video_url
@@ -257,6 +260,7 @@ async def update_reel(
     if thumbnail and thumbnail.filename: reel.thumbnail_url = save_image(thumbnail, "reels")
 
     db.commit()
+    discard_media(db, background_tasks, *old_media)
     db.refresh(reel)
     return _to_dict(
         db.query(Reel).options(joinedload(Reel.product)).filter(Reel.id == reel.id).first()
@@ -264,9 +268,16 @@ async def update_reel(
 
 
 @router.delete("/admin/{reel_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_reel(reel_id: int, db: Session = Depends(get_db), _=Depends(get_admin_user)):
+async def delete_reel(
+    reel_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    _=Depends(get_admin_user),
+):
     reel = db.query(Reel).filter(Reel.id == reel_id).first()
     if not reel:
         raise HTTPException(status_code=404, detail="Reel no encontrado")
+    old_media = (reel.video_url, reel.thumbnail_url)
     db.delete(reel)
     db.commit()
+    discard_media(db, background_tasks, *old_media)
