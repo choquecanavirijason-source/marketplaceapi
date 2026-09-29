@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     minio_secure: bool = False
     # URL pública (la que ve el navegador/celular) que sirve el bucket en
     # lugar de "/media". Solo se usa con storage_backend="minio".
-    media_public_base_url: str = "http://localhost:8003/media"
+    media_public_base_url: str = "http://37.60.247.213:8003/media"
 
     class Config:
         env_file = ".env"

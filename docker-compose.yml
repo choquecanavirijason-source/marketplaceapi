@@ -32,7 +32,7 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-elashes}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-elashes-dev-secret}
       MINIO_BUCKET: marketplace-media
-      MEDIA_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL:-http://localhost:8003/media}
+      MEDIA_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL:-http://37.60.247.213:8003/media}
     volumes:
       - ./media:/app/media
       - ./data:/app/data
