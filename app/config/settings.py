@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     allowed_origins: str = "*"
     secret_key: str = "marketplace-secret-key-change-in-production"
     token_expire_minutes: int = 10080  # 7 días
+    # Secreto server-to-server compartido con elashesbackend (mismo valor que
+    # su INTERNAL_API_KEY). Se envía en X-Internal-Key al verificar logins con
+    # CI y al registrar dispositivos. Vacío = no se registran dispositivos.
+    internal_api_key: str = ""
     # Interruptor temporal para probar en producción qué tanto pesa realmente
     # la recompresión vs. la red/latencia — con esto en true, los reels se
     # suben tal cual (solo faststart, sin recodificar). Se activa/desactiva

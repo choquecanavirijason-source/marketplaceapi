@@ -111,6 +111,10 @@ docker-compose down -v
 
 Ver [.env.example](.env.example) para todas las opciones disponibles.
 
+**Avisos de citas** (`/api/v1/avisos/*` y `device_token` en el login):
+- `INTERNAL_API_KEY`: secreto compartido con elashesbackend; debe tener **el mismo valor** que su `INTERNAL_API_KEY`. Vacío = no se registran dispositivos.
+- En elashesbackend además debe estar `CLIENT_NOTICES_ENABLED=true`; si no, sus rutas de avisos no existen.
+
 ---
 
 ## 👨‍💻 Desarrollo local (sin Docker)
