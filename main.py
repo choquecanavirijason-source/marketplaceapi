@@ -38,6 +38,7 @@ import app.infrastructure.database.migrations.create_favorites_table as m16
 import app.infrastructure.database.migrations.create_presence_table as m17
 import app.infrastructure.database.migrations.create_reel_likes_table as m18
 import app.infrastructure.database.migrations.add_is_featured_to_products as m19
+import app.infrastructure.database.migrations.add_salon_client_id_to_mp_customers as m20
 
 # ── Controllers ───────────────────────────────────────────────
 from app.presentation.controllers.categories_controller  import router as categories_router
@@ -47,6 +48,7 @@ from app.presentation.controllers.collections_controller import router as collec
 from app.presentation.controllers.customers_controller   import router as customers_router
 from app.presentation.controllers.auth_controller        import router as auth_router
 from app.presentation.controllers.booking_controller     import router as booking_router
+from app.presentation.controllers.avisos_controller      import router as avisos_router
 from app.presentation.controllers.ads_controller         import router as ads_router
 from app.presentation.controllers.reels_controller       import router as reels_router
 from app.presentation.controllers.reviews_controller     import router as reviews_router
@@ -97,6 +99,7 @@ MIGRATIONS = [
     ("mp_presence",              m17.upgrade),
     ("mp_reel_likes",            m18.upgrade),
     ("mp_products:is_featured",  m19.upgrade),
+    ("mp_customers:salon_client_id", m20.upgrade),
 ]
 
 for name, fn in MIGRATIONS:
@@ -124,6 +127,7 @@ else:
 PREFIX = "/api"
 app.include_router(auth_router)          # monta en /api/v1/auth (prefijo propio)
 app.include_router(booking_router)       # monta en /api/v1/booking (prefijo propio)
+app.include_router(avisos_router)        # monta en /api/v1/avisos (prefijo propio)
 app.include_router(categories_router,  prefix=PREFIX)
 app.include_router(products_router,    prefix=PREFIX)
 app.include_router(orders_router,      prefix=PREFIX)

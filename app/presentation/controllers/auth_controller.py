@@ -21,6 +21,7 @@ from jose import jwt, JWTError
 from app.config.settings import settings
 from app.core.dependencies import get_db
 from app.core.rate_limit import rate_limit
+from app.core.salon_internal import internal_headers, register_device
 from app.domain.entities.customer import Customer
 from app.domain.entities.review import Review
 
@@ -98,7 +99,7 @@ def get_current_customer_optional(
     return customer
 
 
-def _response(customer: Customer) -> dict:
+def _response(customer: Customer, device_token: Optional[str] = None) -> dict:
     token = _create_token(customer.id)
     return {
         "access_token": token,
@@ -108,7 +109,41 @@ def _response(customer: Customer) -> dict:
         "email": customer.email,
         "phone": customer.phone,
         "external_user_id": customer.id,  # alias para compatibilidad con Flutter AuthUser
+        # Token para /api/v1/avisos/* — None si la cuenta no es del salón o
+        # la app no mandó installation_id/platform. Se entrega una sola vez.
+        "device_token": device_token,
     }
+
+
+def _verify_salon_login(identifier: str, ci: str) -> Optional[dict]:
+    """POST /clients/verify-salon-login. Con X-Internal-Key el salón limita
+    los intentos fallidos por cuenta en vez de por IP (todas las clientas
+    llegan desde la IP del marketplace). None si el salón no responde."""
+    try:
+        r = httpx.post(
+            f"{_SALON_BACKEND_URL}/clients/verify-salon-login",
+            json={"email": identifier, "ci": ci},
+            headers=internal_headers(),
+            timeout=3.0,
+        )
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+
+def _login_response(customer: Customer, payload: "LoginRequest") -> dict:
+    # Mismas reglas que DeviceRegisterRequest en elashesbackend.
+    installation_id = (payload.installation_id or "").strip()
+    device_token = None
+    if (
+        customer.salon_client_id
+        and 8 <= len(installation_id) <= 128
+        and payload.platform in ("android", "ios")
+    ):
+        device_token = register_device(customer.salon_client_id, installation_id, payload.platform)
+    return _response(customer, device_token)
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -125,6 +160,11 @@ class LoginRequest(BaseModel):
     # Acepta email o nombre de usuario (no se valida formato de email)
     email: str
     password: str
+    # Opcionales: si llegan y la cuenta es del salón, se registra el
+    # dispositivo para los avisos de citas. Se validan en _login_response y no
+    # aquí: un valor inválido no debe tumbar el login con un 422.
+    installation_id: Optional[str] = None
+    platform: Optional[str] = None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -178,17 +218,19 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
         if not customer.is_active:
             raise HTTPException(status_code=403, detail="Cuenta desactivada")
         if customer.hashed_pw and _verify(payload.password, customer.hashed_pw):
-            return _response(customer)
+            # Cuentas del salón creadas antes de guardar salon_client_id: su
+            # contraseña es el CI, así que se puede pedir el id una sola vez.
+            if customer.source == "salon" and not customer.salon_client_id:
+                data = _verify_salon_login(identifier, payload.password)
+                if data and data.get("valid") and data.get("id"):
+                    customer.salon_client_id = data["id"]
+                    db.commit()
+            return _login_response(customer, payload)
 
     # ── 2. Intentar login con CI del salón ────────────────────────────────────
     try:
-        r = httpx.post(
-            f"{_SALON_BACKEND_URL}/clients/verify-salon-login",
-            json={"email": identifier, "ci": payload.password},
-            timeout=3.0,
-        )
-        if r.status_code == 200:
-            data = r.json()
+        data = _verify_salon_login(identifier, payload.password)
+        if data is not None:
             if data.get("valid"):
                 if not customer:
                     # El cliente del salón puede no tener email: generar uno interno
@@ -207,6 +249,7 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
                         email=email,
                         hashed_pw=_hash(payload.password),
                         source="salon",
+                        salon_client_id=data.get("id"),
                     )
                     db.add(customer)
                     db.commit()
@@ -214,8 +257,9 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
                 else:
                     # CI cambió en el salón → actualizar hash almacenado
                     customer.hashed_pw = _hash(payload.password)
+                    customer.salon_client_id = data.get("id") or customer.salon_client_id
                     db.commit()
-                return _response(customer)
+                return _login_response(customer, payload)
             if data.get("reason") == "marketplace_not_enabled":
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,

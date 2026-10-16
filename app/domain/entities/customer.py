@@ -19,3 +19,6 @@ class Customer(Base):
     # Código ISO (2 letras) del país del cliente — se pre-llena automáticamente
     # en el registro según el idioma/región del dispositivo, editable por el cliente.
     country_code  = Column(String(2), nullable=True)
+    # Id del Client en elashesbackend (lo devuelve verify-salon-login). Solo
+    # referencia por HTTP — sin FK: las bases de datos son separadas.
+    salon_client_id = Column(Integer, nullable=True, index=True)
