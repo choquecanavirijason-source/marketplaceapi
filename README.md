@@ -111,9 +111,11 @@ docker-compose down -v
 
 Ver [.env.example](.env.example) para todas las opciones disponibles.
 
-**Avisos de citas** (`/api/v1/avisos/*` y `device_token` en el login):
-- `INTERNAL_API_KEY`: secreto compartido con elashesbackend; debe tener **el mismo valor** que su `INTERNAL_API_KEY`. Vacío = no se registran dispositivos.
+**Avisos de citas** (`/api/v1/avisos/*`, y `device_token` en login, registro y `POST /api/v1/auth/device`):
+- `INTERNAL_API_KEY`: secreto compartido con elashesbackend; debe tener **el mismo valor** que su `INTERNAL_API_KEY`. Vacío = no se registran dispositivos ni se vinculan cuentas.
 - En elashesbackend además debe estar `CLIENT_NOTICES_ENABLED=true`; si no, sus rutas de avisos no existen.
+
+**Vínculo con la ficha del salón** (`mp_customers.salon_client_id`): en login, registro, reserva y `POST /api/v1/auth/device`, si la cuenta no lo tiene se consulta `POST /clients/link-marketplace` del salón (por email, luego teléfono; el email todavía no se verifica) y se guarda solo si hay una única coincidencia. Si no hay ninguna, se guarda el `client_id` de la ficha que crea el salón en la primera reserva. Con varias fichas para el mismo email (`ambiguous`) la cuenta queda sin vincular hasta que un admin lo resuelva.
 
 ---
 
@@ -129,6 +131,13 @@ pip install -r requirements.txt
 
 # Ejecutar
 uvicorn main:app --reload --port 8001
+```
+
+**Tests** (SQLite en memoria y salón simulado; no tocan PostgreSQL ni elashesbackend):
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests
 ```
 
 ---

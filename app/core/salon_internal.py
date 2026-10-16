@@ -7,6 +7,8 @@ se duplica ninguna tabla, todo va por HTTP.
   envía donde elashesbackend lo exige; nunca se devuelve a la app.
 - Token de dispositivo: lo emite elashesbackend en POST /dispositivos y la app
   lo manda luego como "Authorization: Bearer <token>", que se reenvía tal cual.
+- Vínculo cuenta ↔ ficha del salón: mp_customers.salon_client_id, resuelto
+  con POST /clients/link-marketplace (por email, sin verificar todavía).
 """
 import os
 from typing import Optional
@@ -45,6 +47,45 @@ def register_device(salon_client_id: int, installation_id: str, platform: str) -
     except Exception:
         pass
     return None
+
+
+def link_marketplace(email: Optional[str], phone: Optional[str]) -> tuple[str, Optional[int]]:
+    """Busca en elashesbackend la ficha que corresponde a una cuenta del
+    marketplace (POST /clients/link-marketplace). Devuelve (status, id):
+    "found" con id; "not_found"/"ambiguous" sin id; "unavailable" si no hay
+    clave o el salón no respondió. Nunca lanza."""
+    if not settings.internal_api_key:
+        return "unavailable", None
+    try:
+        r = httpx.post(
+            f"{_SALON_BACKEND_URL}/clients/link-marketplace",
+            json={"email": email or None, "phone": phone or None},
+            headers=internal_headers(),
+            timeout=3.0,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            link_status = data.get("status")
+            if link_status == "found" and data.get("id"):
+                return "found", data["id"]
+            if link_status in ("not_found", "ambiguous"):
+                return link_status, None
+    except Exception:
+        pass
+    return "unavailable", None
+
+
+def ensure_salon_link(db, customer) -> str:
+    """Si la cuenta aún no tiene salon_client_id, lo busca en el salón y lo
+    guarda solo si hay una única coincidencia. Devuelve el status del vínculo
+    ("found" si ya estaba vinculada)."""
+    if customer.salon_client_id:
+        return "found"
+    link_status, client_id = link_marketplace(customer.email, customer.phone)
+    if client_id:
+        customer.salon_client_id = client_id
+        db.commit()
+    return link_status
 
 
 def device_request(method: str, path: str, authorization: str) -> httpx.Response:
