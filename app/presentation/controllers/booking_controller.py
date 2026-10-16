@@ -39,19 +39,54 @@ def _current_customer(
     return customer
 
 
-def _salon_get(path: str, params: dict | None = None):
+def _salon_get_raw(path: str, params: dict | None = None, headers: dict | None = None) -> httpx.Response:
     try:
-        r = httpx.get(f"{_SALON_BACKEND_URL}{path}", params=params, timeout=8.0)
+        return httpx.get(f"{_SALON_BACKEND_URL}{path}", params=params, headers=headers or {}, timeout=8.0)
     except Exception:
         raise HTTPException(status_code=503, detail="El salón no está disponible en este momento")
+
+
+def _json_or_raise(r: httpx.Response):
     if r.status_code >= 400:
-        detail = "Error del salón"
-        try:
-            detail = r.json().get("detail", detail)
-        except Exception:
-            pass
-        raise HTTPException(status_code=r.status_code, detail=detail)
+        raise HTTPException(status_code=r.status_code, detail=_salon_detail(r, "Error del salón"))
     return r.json()
+
+
+def _salon_get(path: str, params: dict | None = None):
+    return _json_or_raise(_salon_get_raw(path, params))
+
+
+def _salon_get_for(db: Session, customer: Customer, path: str):
+    """GET al salón identificando a la clienta. El email va siempre: un salón
+    que todavía no conoce salon_client_id lo ignora y responde por email como
+    antes. Si la cuenta está vinculada, va también salon_client_id con
+    X-Internal-Key, y el salón usa la ficha por id (cuentas vinculadas por
+    teléfono cuya ficha tiene otro email)."""
+
+    def _get(salon_client_id: Optional[int]) -> httpx.Response:
+        params = {"email": customer.email}
+        headers = None
+        if salon_client_id:
+            params["salon_client_id"] = salon_client_id
+            headers = internal_headers()
+        return _salon_get_raw(path, params, headers)
+
+    linked_id = customer.salon_client_id if settings.internal_api_key else None
+    r = _get(linked_id)
+    if (
+        linked_id
+        and r.status_code == 404
+        and _salon_detail(r, "") == "Cliente no encontrado"
+    ):
+        # La ficha vinculada se borró en el salón: se desvincula, se busca de
+        # nuevo y se reintenta. Un salón sin soporte de salon_client_id también
+        # responde así (buscó por email), pero ensure_salon_link vuelve a
+        # encontrar la misma ficha y el vínculo no se pierde.
+        customer.salon_client_id = None
+        db.commit()
+        ensure_salon_link(db, customer)
+        r = _get(customer.salon_client_id)
+    return _json_or_raise(r)
 
 
 class BookingRequest(BaseModel):
@@ -167,5 +202,14 @@ def create_booking(
 
 
 @router.get("/my-appointments")
-def my_bookings(customer: Customer = Depends(_current_customer)):
-    return _salon_get("/booking-public/my-appointments", {"email": customer.email})
+def my_bookings(customer: Customer = Depends(_current_customer), db: Session = Depends(get_db)):
+    return _salon_get_for(db, customer, "/booking-public/my-appointments")
+
+
+@router.get("/ws-ticket")
+def booking_ws_ticket(customer: Customer = Depends(_current_customer), db: Session = Depends(get_db)):
+    """Token corto + client_id para que la app abra el WebSocket de avisos en
+    vivo directo contra elashesbackend (/ws/client/{client_id}). Ese socket va
+    directo, no pasa por este proxy. 404 si la clienta no tiene ficha en el
+    salón."""
+    return _salon_get_for(db, customer, "/booking-public/ws-ticket")
