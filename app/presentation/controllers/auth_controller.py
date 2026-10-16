@@ -8,20 +8,20 @@ Flujo de login dual:
 """
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Annotated, Literal, Optional
 
 import bcrypt
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, StringConstraints
 from sqlalchemy.orm import Session
 from jose import jwt, JWTError
 
 from app.config.settings import settings
 from app.core.dependencies import get_db
 from app.core.rate_limit import rate_limit
-from app.core.salon_internal import internal_headers, register_device
+from app.core.salon_internal import ensure_salon_link, internal_headers, register_device
 from app.domain.entities.customer import Customer
 from app.domain.entities.review import Review
 
@@ -109,8 +109,9 @@ def _response(customer: Customer, device_token: Optional[str] = None) -> dict:
         "email": customer.email,
         "phone": customer.phone,
         "external_user_id": customer.id,  # alias para compatibilidad con Flutter AuthUser
-        # Token para /api/v1/avisos/* — None si la cuenta no es del salón o
-        # la app no mandó installation_id/platform. Se entrega una sola vez.
+        # Token para /api/v1/avisos/* — None si la cuenta no está vinculada a
+        # una ficha del salón o la app no mandó installation_id/platform. Se
+        # entrega una sola vez; si falta, la app lo pide en POST /device.
         "device_token": device_token,
     }
 
@@ -133,17 +134,25 @@ def _verify_salon_login(identifier: str, ci: str) -> Optional[dict]:
     return None
 
 
-def _login_response(customer: Customer, payload: "LoginRequest") -> dict:
+def _device_token(customer: Customer, installation_id: Optional[str], platform: Optional[str]) -> Optional[str]:
     # Mismas reglas que DeviceRegisterRequest en elashesbackend.
-    installation_id = (payload.installation_id or "").strip()
-    device_token = None
+    installation_id = (installation_id or "").strip()
     if (
         customer.salon_client_id
         and 8 <= len(installation_id) <= 128
-        and payload.platform in ("android", "ios")
+        and platform in ("android", "ios")
     ):
-        device_token = register_device(customer.salon_client_id, installation_id, payload.platform)
-    return _response(customer, device_token)
+        return register_device(customer.salon_client_id, installation_id, platform)
+    return None
+
+
+def _auth_response(
+    db: Session, customer: Customer, installation_id: Optional[str], platform: Optional[str]
+) -> dict:
+    # Cuentas creadas por /register (source="app") nacen sin salon_client_id:
+    # se busca su ficha del salón por email/teléfono para que reciban avisos.
+    ensure_salon_link(db, customer)
+    return _response(customer, _device_token(customer, installation_id, platform))
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -154,6 +163,10 @@ class RegisterRequest(BaseModel):
     password: str
     phone: Optional[str] = None
     country_code: Optional[str] = None
+    # Igual que en LoginRequest: si la cuenta queda vinculada a una ficha del
+    # salón, se devuelve device_token en la misma respuesta.
+    installation_id: Optional[str] = None
+    platform: Optional[str] = None
 
 
 class LoginRequest(BaseModel):
@@ -161,10 +174,16 @@ class LoginRequest(BaseModel):
     email: str
     password: str
     # Opcionales: si llegan y la cuenta es del salón, se registra el
-    # dispositivo para los avisos de citas. Se validan en _login_response y no
+    # dispositivo para los avisos de citas. Se validan en _device_token y no
     # aquí: un valor inválido no debe tumbar el login con un 422.
     installation_id: Optional[str] = None
     platform: Optional[str] = None
+
+
+class DeviceRequest(BaseModel):
+    # Aquí sí se valida con 422: el endpoint no hace otra cosa.
+    installation_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=8, max_length=128)]
+    platform: Literal["android", "ios"]
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -195,7 +214,7 @@ def register(payload: RegisterRequest, request: Request, db: Session = Depends(g
     db.add(customer)
     db.commit()
     db.refresh(customer)
-    return _response(customer)
+    return _auth_response(db, customer, payload.installation_id, payload.platform)
 
 
 @router.post("/login")
@@ -225,7 +244,7 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
                 if data and data.get("valid") and data.get("id"):
                     customer.salon_client_id = data["id"]
                     db.commit()
-            return _login_response(customer, payload)
+            return _auth_response(db, customer, payload.installation_id, payload.platform)
 
     # ── 2. Intentar login con CI del salón ────────────────────────────────────
     try:
@@ -259,7 +278,7 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
                     customer.hashed_pw = _hash(payload.password)
                     customer.salon_client_id = data.get("id") or customer.salon_client_id
                     db.commit()
-                return _login_response(customer, payload)
+                return _auth_response(db, customer, payload.installation_id, payload.platform)
             if data.get("reason") == "marketplace_not_enabled":
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
@@ -274,6 +293,26 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Email o contraseña incorrectos",
     )
+
+
+@router.post("/device")
+def register_customer_device(
+    payload: DeviceRequest,
+    request: Request,
+    customer: Customer = Depends(get_current_customer),
+    db: Session = Depends(get_db),
+):
+    """Token de avisos para una sesión ya iniciada. Lo usa la app cuando no
+    recibió device_token en el login/registro — típicamente una clienta que
+    se vinculó con su ficha del salón recién al hacer su primera reserva.
+    linked=false: la cuenta aún no tiene ficha en el salón (reintentar tras
+    reservar). linked=true sin token: avisos no disponibles ahora mismo."""
+    rate_limit(request, "device", max_attempts=10, window_seconds=60)
+    ensure_salon_link(db, customer)
+    return {
+        "device_token": _device_token(customer, payload.installation_id, payload.platform),
+        "linked": bool(customer.salon_client_id),
+    }
 
 
 @router.get("/me")
