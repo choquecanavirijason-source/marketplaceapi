@@ -56,16 +56,51 @@ def _remux_faststart(filepath: str) -> None:
 # Se usa CRF (calidad constante) en vez de bitrate fijo — en vez de decirle
 # a ffmpeg "usá tantos kbps sí o sí" (que desperdicia bits en escenas simples
 # y le faltan en escenas con movimiento, perdiendo nitidez ahí), se le pide
-# "mantené esta calidad visual" y usa los bits que haga falta. crf 18 es
-# considerado "visualmente sin pérdida" para H.264. v_maxrate/v_bufsize
-# quedan solo como techo de seguridad (necesario para streaming) — no bajan
-# la calidad real (eso lo sigue haciendo el CRF), pero si quedan demasiado
-# altos, en datos móviles el reproductor tarda en juntar buffer y se nota
-# como "carga lenta" aunque la conexión no sea tan mala.
+# "mantené esta calidad visual" y usa los bits que haga falta.
+#
+# v_maxrate/v_bufsize son el techo de los PICOS, no solo del promedio. Con
+# bufsize mayor que maxrate (antes: high 4000k/6000k), x264 puede volcar el
+# buffer entero en un segmento: medido en producción, cada 4 segmentos de 2s
+# "high" llegaba a ~7 Mbps aunque el promedio fuera ~3.9. Con CloudFront
+# (que entrega lo bastante rápido como para que el reproductor elija "high")
+# esos picos vaciaban el buffer y el video se cortaba cada ~8 segundos.
+# bufsize = maxrate mantiene los picos cerca del techo declarado.
 HLS_RENDITIONS = [
-    {"name": "low", "max_dim": 720, "crf": "23", "v_maxrate": "1500k", "v_bufsize": "2200k", "a_bitrate": "128k", "bandwidth": 1700000},
-    {"name": "high", "max_dim": 1920, "crf": "18", "v_maxrate": "4000k", "v_bufsize": "6000k", "a_bitrate": "160k", "bandwidth": 4300000},
+    {"name": "low", "max_dim": 720, "crf": "23", "v_maxrate": "1200k", "v_bufsize": "1200k", "a_bitrate": "128k"},
+    {"name": "high", "max_dim": 1920, "crf": "20", "v_maxrate": "3000k", "v_bufsize": "3000k", "a_bitrate": "128k"},
 ]
+
+# Segmentos más cortos que esto (el último de cada video, típicamente) no
+# cuentan para el pico: unos pocos KB en una fracción de segundo darían un
+# "bitrate" inflado que no representa la reproducción real.
+_MIN_SEGMENT_SECONDS_FOR_PEAK = 1.0
+
+
+def _measure_rendition_bitrates(playlist_path: str) -> Tuple[int, int]:
+    """(pico, promedio) en bits/s de una variante HLS ya generada, medidos
+    sobre los segmentos reales. El pico va como BANDWIDTH en el master: es lo
+    que el reproductor usa para decidir si le alcanza la conexión, y antes se
+    declaraba un valor fijo (4.3 Mbps para "high") muy por debajo del pico
+    real, así que elegía "high" sin poder sostenerla."""
+    out_dir = os.path.dirname(playlist_path)
+    peak = 0
+    total_bits = 0
+    total_seconds = 0.0
+    duration = None
+    with open(playlist_path) as f:
+        for raw in f:
+            line = raw.strip()
+            if line.startswith("#EXTINF:"):
+                duration = float(line[len("#EXTINF:"):].split(",")[0])
+            elif line and not line.startswith("#") and duration:
+                bits = os.path.getsize(os.path.join(out_dir, line)) * 8
+                total_bits += bits
+                total_seconds += duration
+                if duration >= _MIN_SEGMENT_SECONDS_FOR_PEAK:
+                    peak = max(peak, int(bits / duration))
+                duration = None
+    average = int(total_bits / total_seconds) if total_seconds else 0
+    return (peak or average), average
 
 # NO SE USA ACTUALMENTE (ver save_video más abajo): era la calidad del
 # single-MP4 que usaban los reels antes de volver a probar HLS para ellos.
@@ -186,8 +221,12 @@ def _generate_hls(source_path: str, out_dir: str) -> bool:
 
         master_lines = ["#EXTM3U"]
         for rendition in HLS_RENDITIONS:
-            master_lines.append(f"#EXT-X-STREAM-INF:BANDWIDTH={rendition['bandwidth']}")
-            master_lines.append(f"{rendition['name']}.m3u8")
+            playlist = f"{rendition['name']}.m3u8"
+            peak, average = _measure_rendition_bitrates(os.path.join(out_dir, playlist))
+            master_lines.append(
+                f"#EXT-X-STREAM-INF:BANDWIDTH={peak},AVERAGE-BANDWIDTH={average}"
+            )
+            master_lines.append(playlist)
         with open(os.path.join(out_dir, "master.m3u8"), "w") as f:
             f.write("\n".join(master_lines) + "\n")
         return True
