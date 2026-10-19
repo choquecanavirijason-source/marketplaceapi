@@ -102,22 +102,32 @@ def _measure_rendition_bitrates(playlist_path: str) -> Tuple[int, int]:
     average = int(total_bits / total_seconds) if total_seconds else 0
     return (peak or average), average
 
-# NO SE USA ACTUALMENTE (ver save_video más abajo): era la calidad del
-# single-MP4 que usaban los reels antes de volver a probar HLS para ellos.
-# Se deja sin borrar por si hay que volver atrás rápido a single-MP4 si el
-# reintento de HLS no anda bien. Historial de ajustes probados en esta
-# VPS/conexión, de más liviano a más pesado:
+# Calidad del MP4 único de los REELS (ver save_video). Los reels volvieron
+# de HLS a un solo MP4 porque HLS necesita 3 pedidos seguidos antes del
+# primer frame (master -> playlist -> segmento), y con ~0.4-0.6 s de latencia
+# por pedido hacia CloudFront eso solo ya eran ~1.5 s de arranque. Un MP4
+# con faststart arranca con UN pedido, y la app puede bajar a disco el
+# comienzo de varios reels siguientes (cosa que con HLS no se podía).
+#
+# Historial de ajustes probados en esta VPS/conexión, de más liviano a más
+# pesado:
 #   1080p/CRF24/1800kbps -> cargaba fluido pero tardaba demasiado en
 #     bufferear en datos móviles ("a tirones" mientras carga).
 #   640px/CRF27/700kbps  -> carga fluida, pero se ve pixelado/con poca
 #     nitidez (resolución y bits por pixel ambos muy bajos).
 #   720px/CRF25/1100kbps -> confirmado en el celular real, fluido y buena
 #     calidad.
-#   720px/CRF23/1400kbps -> también confirmado fluido sin cortes.
+#   720px/CRF23/1400kbps -> también confirmado fluido sin cortes.  <- ACTUAL
 #   900px/CRF21/1800kbps -> volvió a laguear, ese salto fue demasiado grande.
-# Paso más chico esta vez: 800px (no 900) con el mismo bitrate que ya
-# anduvo bien, a ver si el salto de resolución más moderado sigue fluido.
-REEL_RENDITION = {"max_dim": 800, "crf": "23", "v_maxrate": "1400k", "v_bufsize": "2200k", "a_bitrate": "112k"}
+# bufsize = 1.5 × maxrate: algo de margen para escenas con movimiento sin
+# picos como los que cortaban la variante "high" de HLS.
+REEL_RENDITION = {"max_dim": 720, "crf": "23", "v_maxrate": "1400k", "v_bufsize": "2100k", "a_bitrate": "112k"}
+
+# Nombre del MP4 procesado dentro de la carpeta del reel:
+# .../videos/{uuid}/video.mp4 (mismo esquema de carpeta que el HLS, así
+# borrar/limpiar/descargar el original funcionan igual para los dos).
+REEL_MP4_NAME = "video.mp4"
+_PROCESSED_NAMES = ("master.m3u8", REEL_MP4_NAME)
 
 
 def _is_hdr_source(source_path: str) -> bool:
@@ -270,6 +280,9 @@ def _compress_single_video(source_path: str, output_path: str) -> bool:
                 "-fps_mode", "cfr",
                 "-c:v", "libx264", "-preset", "medium",
                 "-crf", rendition["crf"], "-maxrate", rendition["v_maxrate"], "-bufsize", rendition["v_bufsize"],
+                # Keyframe cada 48 frames (~2 s): adelantar/atrasar en la barra
+                # cae siempre cerca de un keyframe, sin decodificar de más.
+                "-g", "48", "-keyint_min", "48",
                 "-c:a", "aac", "-b:a", rendition["a_bitrate"], "-ac", "2",
                 "-movflags", "+faststart",
                 output_path,
@@ -337,19 +350,33 @@ def save_video(file: UploadFile, subfolder: str = "products") -> str:
         _write_upload(file, filepath, MAX_VIDEO_SIZE_BYTES, "El video")
         _remux_faststart(filepath)
 
-        # Reels y productos usan streaming adaptativo (HLS): el reproductor
-        # pide de a segmentos y sube/baja de calidad según la velocidad real.
-        # El .mp4 original se guarda igual, como respaldo descargable.
-        hls_dir = os.path.join(work, name)
-        os.makedirs(hls_dir)
-        hls_ok = _generate_hls(filepath, hls_dir)
-        if hls_ok:
-            storage.put_dir(hls_dir, f"{videos_key}/{name}", last="master.m3u8")
+        # Reels: un solo MP4 720p con faststart (ver REEL_RENDITION).
+        # Productos: streaming adaptativo (HLS), el reproductor pide de a
+        # segmentos y sube/baja de calidad según la velocidad real.
+        # En los dos casos el original se guarda igual, como respaldo
+        # descargable.
+        out_dir = os.path.join(work, name)
+        os.makedirs(out_dir)
+        if subfolder == "reels":
+            processed = REEL_MP4_NAME
+            ok = _compress_single_video(filepath, os.path.join(out_dir, processed))
+        else:
+            processed = "master.m3u8"
+            ok = _generate_hls(filepath, out_dir)
+        if ok:
+            storage.put_dir(out_dir, f"{videos_key}/{name}", last=processed)
         storage.put_file(filepath, f"{videos_key}/{filename}")
 
-    if hls_ok:
-        return storage.public_url(f"{videos_key}/{name}/master.m3u8")
+    if ok:
+        return storage.public_url(f"{videos_key}/{name}/{processed}")
     return storage.public_url(f"{videos_key}/{filename}")
+
+
+def _processed_dir_key(key: str) -> Optional[str]:
+    """Carpeta .../videos/{uuid} si la clave es un video procesado (master.m3u8
+    de HLS o video.mp4 de reel), si no None."""
+    folder, _, name = key.rpartition("/")
+    return folder if folder and name in _PROCESSED_NAMES else None
 
 
 def _url_to_key(url: str) -> Optional[str]:
@@ -374,18 +401,16 @@ def _url_to_key(url: str) -> Optional[str]:
 
 
 def get_video_download_url(video_url: Optional[str]) -> Optional[str]:
-    """Dado el video_url guardado (el master.m3u8 de un HLS, o un .mp4
-    directo de antes de HLS), devuelve la URL del .mp4 original que se
-    guarda como respaldo, para que el admin pueda descargar el video tal
-    como lo subieron."""
+    """Dado el video_url guardado (el master.m3u8 de un HLS, el video.mp4
+    procesado de un reel, o un .mp4 directo viejo), devuelve la URL del
+    original que se guarda como respaldo, para que el admin pueda descargar
+    el video tal como lo subieron."""
     if not video_url:
         return None
-    if not video_url.endswith("/master.m3u8"):
-        return video_url
-
-    hls_dir_key = _url_to_key(video_url.rsplit("/", 1)[0])  # .../videos/{uuid}
+    key = _url_to_key(video_url)
+    hls_dir_key = _processed_dir_key(key) if key else None  # .../videos/{uuid}
     if hls_dir_key is None:
-        return None
+        return video_url
     # El original vive al lado de la carpeta HLS: .../videos/{uuid}.<ext>
     for key in storage.list_keys(hls_dir_key + "."):
         if os.path.splitext(key)[1].lower() in ALLOWED_VIDEO_EXT:
@@ -401,12 +426,13 @@ def is_managed_media(url: Optional[str]) -> bool:
 
 def media_storage_keys(url: str) -> Tuple[Set[str], Set[str]]:
     """(claves exactas, prefijos) que ocupa en el storage un archivo publicado.
-    Un HLS es su carpeta de segmentos más el .mp4 original de respaldo."""
+    Un video procesado (HLS o MP4 de reel) es su carpeta más el original de
+    respaldo."""
     key = _url_to_key(url)
     if key is None:
         return set(), set()
-    if key.endswith("/master.m3u8"):
-        hls_dir = key.rsplit("/", 1)[0]
+    hls_dir = _processed_dir_key(key)
+    if hls_dir is not None:
         return set(), {hls_dir + "/", hls_dir + "."}
     return {key}, set()
 
