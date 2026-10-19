@@ -31,6 +31,21 @@ class Settings(BaseSettings):
     # lugar de "/media". Solo se usa con storage_backend="minio".
     media_public_base_url: str = "http://37.60.247.213:8003/media"
 
+    # Storage específico para REELS (video + portada), aparte de
+    # storage_backend: productos/categorías/anuncios/colecciones siguen
+    # usando storage_backend sin cambios. "local"/"minio" (igual que
+    # storage_backend) o "s3" (AWS). Vacío = los reels siguen storage_backend
+    # como hasta ahora, para no romper nada hasta que se configure AWS acá.
+    reels_storage_backend: str = ""
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    aws_region: str = "sa-east-1"
+    aws_bucket: str = ""
+    # Lectura pública directa del bucket (sin CDN todavía). Si más adelante
+    # se pone CloudFront delante, este valor pasa a ser la URL de esa
+    # distribución y no hay que tocar nada más.
+    aws_public_base_url: str = ""
+
     class Config:
         env_file = ".env"
         case_sensitive = False

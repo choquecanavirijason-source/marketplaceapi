@@ -1,8 +1,17 @@
-"""Destino final de los archivos subidos: disco local o bucket MinIO.
+"""Destino final de los archivos subidos: disco local, bucket MinIO, o AWS S3.
 
-Las claves son rutas relativas tipo "marketplace/reels/videos/abc/master.m3u8"
-y la URL pública siempre es "/media/<clave>", en los dos modos. Así la base de
-datos, la app y el admin no cambian al pasar de disco a MinIO.
+Las claves son rutas relativas tipo "marketplace/reels/videos/abc/master.m3u8".
+
+Para todo lo que NO sea reel (productos, categorías, anuncios, colecciones),
+la URL pública siempre es "/media/<clave>" y el backend es storage_backend
+("local" o "minio") — sin cambios respecto a antes.
+
+Los REELS (claves bajo "marketplace/reels/") pueden ir aparte a AWS S3, vía
+reels_storage_backend="s3": en ese caso la URL pública es la URL directa del
+bucket (no "/media/..."), porque el archivo no vive en el servidor ni en
+MinIO. Con reels_storage_backend vacío, los reels siguen storage_backend
+igual que el resto, así que activar AWS es un cambio de configuración, no
+de código.
 """
 import mimetypes
 import os
@@ -24,12 +33,34 @@ _CONTENT_TYPES = {
     ".webp": "image/webp",
 }
 
+REELS_KEY_PREFIX = "marketplace/reels/"
+
+
+def _is_reel_key(key: str) -> bool:
+    return key.startswith(REELS_KEY_PREFIX)
+
+
+def _backend_for(key: str) -> str:
+    """"local" | "minio" | "s3" — la que de verdad aplica para esta clave."""
+    if _is_reel_key(key) and settings.reels_storage_backend.lower() == "s3":
+        return "s3"
+    return "minio" if settings.storage_backend.lower() == "minio" else "local"
+
 
 def use_minio() -> bool:
+    """Compatibilidad: True si el storage GENERAL (no-reels) es MinIO."""
     return settings.storage_backend.lower() == "minio"
 
 
+def aws_base_url() -> str:
+    if settings.aws_public_base_url:
+        return settings.aws_public_base_url.rstrip("/")
+    return f"https://{settings.aws_bucket}.s3.{settings.aws_region}.amazonaws.com"
+
+
 def public_url(key: str) -> str:
+    if _backend_for(key) == "s3":
+        return f"{aws_base_url()}/{key}"
     return f"/media/{key}"
 
 
@@ -39,7 +70,7 @@ def _content_type(path: str) -> str:
 
 
 @lru_cache(maxsize=1)
-def _client():
+def _minio_client():
     from minio import Minio
 
     return Minio(
@@ -50,10 +81,30 @@ def _client():
     )
 
 
+@lru_cache(maxsize=1)
+def _s3_client():
+    import boto3
+
+    return boto3.client(
+        "s3",
+        region_name=settings.aws_region,
+        aws_access_key_id=settings.aws_access_key_id,
+        aws_secret_access_key=settings.aws_secret_access_key,
+    )
+
+
 def put_file(local_path: str, key: str) -> None:
     """Mueve un archivo local a su destino final bajo `key`."""
-    if use_minio():
-        _client().fput_object(
+    backend = _backend_for(key)
+    if backend == "s3":
+        _s3_client().upload_file(
+            local_path, settings.aws_bucket, key,
+            ExtraArgs={"ContentType": _content_type(local_path)},
+        )
+        os.remove(local_path)
+        return
+    if backend == "minio":
+        _minio_client().fput_object(
             settings.minio_bucket, key, local_path, content_type=_content_type(local_path)
         )
         os.remove(local_path)
@@ -78,10 +129,21 @@ def put_dir(local_dir: str, key_prefix: str, last: str = "") -> None:
 def list_keys(prefix: str) -> List[str]:
     """Claves de archivos (no carpetas) cuyo nombre empieza con `prefix`,
     dentro de la misma "carpeta" (no recursivo)."""
-    if use_minio():
+    backend = _backend_for(prefix)
+    if backend == "s3":
+        parent_key, name_prefix = posixpath.split(prefix)
+        resp = _s3_client().list_objects_v2(
+            Bucket=settings.aws_bucket, Prefix=f"{parent_key}/" if parent_key else "", Delimiter="/"
+        )
+        return [
+            obj["Key"]
+            for obj in resp.get("Contents", [])
+            if posixpath.basename(obj["Key"]).startswith(name_prefix)
+        ]
+    if backend == "minio":
         return [
             obj.object_name
-            for obj in _client().list_objects(settings.minio_bucket, prefix=prefix)
+            for obj in _minio_client().list_objects(settings.minio_bucket, prefix=prefix)
             if not obj.is_dir
         ]
     parent_key, name_prefix = posixpath.split(prefix)
@@ -96,8 +158,12 @@ def list_keys(prefix: str) -> List[str]:
 
 
 def delete_key(key: str) -> None:
-    if use_minio():
-        _client().remove_object(settings.minio_bucket, key)
+    backend = _backend_for(key)
+    if backend == "s3":
+        _s3_client().delete_object(Bucket=settings.aws_bucket, Key=key)
+        return
+    if backend == "minio":
+        _minio_client().remove_object(settings.minio_bucket, key)
         return
     path = os.path.join(settings.media_base_path, *key.split("/"))
     if os.path.isfile(path):
@@ -106,18 +172,41 @@ def delete_key(key: str) -> None:
 
 def delete_prefix(prefix: str) -> None:
     """Borra todo lo que cuelga de una "carpeta" (prefix terminado en "/")."""
-    if use_minio():
-        for obj in _client().list_objects(settings.minio_bucket, prefix=prefix, recursive=True):
-            _client().remove_object(settings.minio_bucket, obj.object_name)
+    backend = _backend_for(prefix)
+    if backend == "s3":
+        client = _s3_client()
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=settings.aws_bucket, Prefix=prefix):
+            keys = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+            if keys:
+                client.delete_objects(Bucket=settings.aws_bucket, Delete={"Objects": keys})
+        return
+    if backend == "minio":
+        client = _minio_client()
+        for obj in client.list_objects(settings.minio_bucket, prefix=prefix, recursive=True):
+            client.remove_object(settings.minio_bucket, obj.object_name)
         return
     shutil.rmtree(os.path.join(settings.media_base_path, *prefix.strip("/").split("/")), ignore_errors=True)
 
 
 def iter_objects(prefix: str) -> Iterator[Tuple[str, int, datetime]]:
     """(clave, tamaño en bytes, última modificación UTC) de todo lo que hay
-    bajo `prefix`, recursivo."""
-    if use_minio():
-        for obj in _client().list_objects(settings.minio_bucket, prefix=prefix, recursive=True):
+    bajo `prefix`, recursivo.
+
+    Nota: con reels en S3 y el resto en local/MinIO, un `prefix` amplio como
+    "marketplace/" NO cubre los dos a la vez — el llamador (ej. el comando de
+    limpieza) debe recorrer "marketplace/reels/" y el resto por separado si
+    usa backends distintos. Ver [app/scripts/cleanup_media.py]."""
+    backend = _backend_for(prefix)
+    if backend == "s3":
+        client = _s3_client()
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=settings.aws_bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                yield obj["Key"], obj["Size"], obj["LastModified"]
+        return
+    if backend == "minio":
+        for obj in _minio_client().list_objects(settings.minio_bucket, prefix=prefix, recursive=True):
             yield obj.object_name, obj.size, obj.last_modified
         return
     root = os.path.join(settings.media_base_path, *prefix.strip("/").split("/"))

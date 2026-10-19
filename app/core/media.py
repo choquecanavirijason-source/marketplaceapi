@@ -313,6 +313,27 @@ def save_video(file: UploadFile, subfolder: str = "products") -> str:
     return storage.public_url(f"{videos_key}/{filename}")
 
 
+def _url_to_key(url: str) -> Optional[str]:
+    """Convierte una URL guardada en base de datos a su clave de storage
+    (relativa, ej. "marketplace/reels/videos/abc/master.m3u8"), sea cual sea
+    el backend que la sirve. `None` si la URL no es nuestra (ej. un link
+    externo que el admin pegó a mano) — esas nunca se tocan.
+
+    Dos formas posibles, según el backend que tenía activo cuando se guardó:
+      - "/media/<clave>"                      (disco o MinIO, vía /media/)
+      - "<base pública de AWS>/<clave>"        (reels en S3, URL absoluta)
+    """
+    if url.startswith("/media/"):
+        return url[len("/media/"):]
+    from app.config.settings import settings
+
+    if settings.aws_bucket:
+        aws_prefix = storage.aws_base_url() + "/"
+        if url.startswith(aws_prefix):
+            return url[len(aws_prefix):]
+    return None
+
+
 def get_video_download_url(video_url: Optional[str]) -> Optional[str]:
     """Dado el video_url guardado (el master.m3u8 de un HLS, o un .mp4
     directo de antes de HLS), devuelve la URL del .mp4 original que se
@@ -323,29 +344,28 @@ def get_video_download_url(video_url: Optional[str]) -> Optional[str]:
     if not video_url.endswith("/master.m3u8"):
         return video_url
 
-    hls_dir_url = video_url.rsplit("/", 1)[0]  # /media/.../videos/{uuid}
-    if not hls_dir_url.startswith("/media/"):
+    hls_dir_key = _url_to_key(video_url.rsplit("/", 1)[0])  # .../videos/{uuid}
+    if hls_dir_key is None:
         return None
     # El original vive al lado de la carpeta HLS: .../videos/{uuid}.<ext>
-    for key in storage.list_keys(hls_dir_url[len("/media/"):] + "."):
+    for key in storage.list_keys(hls_dir_key + "."):
         if os.path.splitext(key)[1].lower() in ALLOWED_VIDEO_EXT:
             return storage.public_url(key)
     return None
 
 
-MANAGED_MEDIA_PREFIX = "/media/marketplace/"
-
-
 def is_managed_media(url: Optional[str]) -> bool:
     """True solo para archivos que subió este backend. Links externos o
     rutas de otro backend (ej. productos importados del salón) no se tocan."""
-    return bool(url) and url.startswith(MANAGED_MEDIA_PREFIX)
+    return bool(url) and _url_to_key(url) is not None
 
 
 def media_storage_keys(url: str) -> Tuple[Set[str], Set[str]]:
     """(claves exactas, prefijos) que ocupa en el storage un archivo publicado.
     Un HLS es su carpeta de segmentos más el .mp4 original de respaldo."""
-    key = url[len("/media/"):]
+    key = _url_to_key(url)
+    if key is None:
+        return set(), set()
     if key.endswith("/master.m3u8"):
         hls_dir = key.rsplit("/", 1)[0]
         return set(), {hls_dir + "/", hls_dir + "."}
