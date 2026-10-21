@@ -16,6 +16,21 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # Almacenamiento de objetos (fotos de perfil). API S3 en :9000, consola en :9001.
+  minio:
+    image: minio/minio:latest
+    container_name: marketplace-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    restart: unless-stopped
+
   marketplace-api:
     build: .
     container_name: marketplace-api
@@ -25,6 +40,11 @@ services:
     environment:
       # Dentro de Compose, el hostname de PostgreSQL es el nombre del servicio: postgres.
       DATABASE_URL: postgresql+psycopg://marketplace:marketplace@postgres:5432/marketplace
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      # URL que usa el teléfono para bajar la imagen (IP de la PC / dominio).
+      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-http://localhost:9000}
     volumes:
       - ./media:/app/media
       - ./data:/app/data
@@ -33,6 +53,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      minio:
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/docs"]
@@ -57,3 +79,4 @@ services:
 
 volumes:
   postgres-data:
+  minio-data:

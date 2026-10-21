@@ -19,3 +19,5 @@ class Customer(Base):
     # Código ISO (2 letras) del país del cliente — se pre-llena automáticamente
     # en el registro según el idioma/región del dispositivo, editable por el cliente.
     country_code  = Column(String(2), nullable=True)
+    # URL pública de la foto de perfil (objeto en MinIO, bucket avatars).
+    avatar_url    = Column(String(500), nullable=True)

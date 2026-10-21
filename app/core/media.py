@@ -287,7 +287,7 @@ def save_video(file: UploadFile, subfolder: str = "products") -> str:
         raise HTTPException(
             status_code=400,
             detail=f"Formato de video no permitido. Usa: {', '.join(ALLOWED_VIDEO_EXT)}",
-        )
+        ) 
 
     folder = os.path.join(settings.media_base_path, "marketplace", subfolder, "videos")
     os.makedirs(folder, exist_ok=True)

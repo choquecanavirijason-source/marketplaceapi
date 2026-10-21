@@ -13,6 +13,14 @@ class Settings(BaseSettings):
     # suben tal cual (solo faststart, sin recodificar). Se activa/desactiva
     # con la variable de entorno del mismo nombre, sin tocar código.
     skip_reel_compression: bool = False
+    # MinIO (fotos de perfil). minio_public_url es la URL que el teléfono usa
+    # para descargar los objetos (host/IP alcanzable desde fuera de Docker).
+    minio_endpoint: str = "minio:9000"
+    minio_access_key: str = "minioadmin"
+    minio_secret_key: str = "minioadmin"
+    minio_secure: bool = False
+    minio_avatars_bucket: str = "avatars"
+    minio_public_url: str = "http://localhost:9000"
 
     class Config:
         env_file = ".env"

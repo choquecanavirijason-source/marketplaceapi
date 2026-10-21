@@ -37,6 +37,7 @@ import app.infrastructure.database.migrations.create_favorites_table as m16
 import app.infrastructure.database.migrations.create_presence_table as m17
 import app.infrastructure.database.migrations.create_reel_likes_table as m18
 import app.infrastructure.database.migrations.add_is_featured_to_products as m19
+import app.infrastructure.database.migrations.add_avatar_url_to_mp_customers as m20
 
 # ── Controllers ───────────────────────────────────────────────
 from app.presentation.controllers.categories_controller  import router as categories_router
@@ -96,6 +97,7 @@ MIGRATIONS = [
     ("mp_presence",              m17.upgrade),
     ("mp_reel_likes",            m18.upgrade),
     ("mp_products:is_featured",  m19.upgrade),
+    ("mp_customers:avatar_url",   m20.upgrade),
 ]
 
 for name, fn in MIGRATIONS:

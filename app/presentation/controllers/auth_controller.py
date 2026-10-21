@@ -12,7 +12,8 @@ from typing import Optional
 
 import bcrypt
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -21,6 +22,7 @@ from jose import jwt, JWTError
 from app.config.settings import settings
 from app.core.dependencies import get_db
 from app.core.rate_limit import rate_limit
+from app.core.storage import delete_avatar_by_url, upload_avatar
 from app.domain.entities.customer import Customer
 from app.domain.entities.review import Review
 
@@ -107,6 +109,7 @@ def _response(customer: Customer) -> dict:
         "nombre": customer.name,
         "email": customer.email,
         "phone": customer.phone,
+        "avatar_url": customer.avatar_url,
         "external_user_id": customer.id,  # alias para compatibilidad con Flutter AuthUser
     }
 
@@ -240,6 +243,7 @@ def me(customer: Customer = Depends(get_current_customer), db: Session = Depends
         "nombre": customer.name,
         "email": customer.email,
         "phone": customer.phone,
+        "avatar_url": customer.avatar_url,
         "reviews_count": reviews_count,
     }
 
@@ -267,5 +271,37 @@ def update_me(
         "nombre": customer.name,
         "email": customer.email,
         "phone": customer.phone,
+        "avatar_url": customer.avatar_url,
         "reviews_count": reviews_count,
     }
+
+
+_AVATAR_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+_AVATAR_MAX_BYTES = 5 * 1024 * 1024
+
+
+@router.post("/me/avatar")
+async def upload_avatar_me(
+    file: UploadFile = File(...),
+    customer: Customer = Depends(get_current_customer),
+    db: Session = Depends(get_db),
+):
+    ext = _AVATAR_TYPES.get((file.content_type or "").lower())
+    if ext is None:
+        raise HTTPException(status_code=400, detail="Formato no soportado (usa JPG, PNG o WEBP)")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Archivo vacío")
+    if len(data) > _AVATAR_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="La imagen supera los 5 MB")
+    try:
+        url = await run_in_threadpool(
+            upload_avatar, data, ext, file.content_type, customer.id
+        )
+    except Exception:
+        raise HTTPException(status_code=502, detail="No se pudo guardar la imagen en el almacenamiento")
+    old_url = customer.avatar_url
+    customer.avatar_url = url
+    db.commit()
+    await run_in_threadpool(delete_avatar_by_url, old_url)
+    return {"avatar_url": url}
