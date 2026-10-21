@@ -53,19 +53,9 @@ docker-compose down
 
 ---
 
-## 🖼️ Fotos de perfil (MinIO)
+## 🖼️ Fotos de perfil
 
-`POST /api/v1/auth/me/avatar` (multipart, campo `file`) guarda la foto en el bucket `avatars` de MinIO como `user_<id>_<timestamp>.<ext>` y devuelve `avatar_url`. El bucket se crea solo, con lectura pública.
-
-Variables de entorno (ver `docker-compose.yml`):
-
-| Variable | Descripción |
-|---|---|
-| `MINIO_ENDPOINT` | Host interno de MinIO (por defecto `minio:9000`) |
-| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | Credenciales — **cambiar en producción** (por defecto `minioadmin`) |
-| `MINIO_PUBLIC_URL` | URL pública con la que la app descarga las fotos (IP/dominio alcanzable desde el teléfono, ej. `http://IP:9000`) |
-
-Al desplegar: reconstruir la imagen (`docker compose up -d --build`) para instalar `minio`, y abrir el puerto 9000 (o publicarlo detrás de nginx).
+`POST /api/v1/auth/me/avatar` (multipart, campo `file`; JPG, PNG o WEBP, máx. 5 MB) guarda la foto como `avatars/user_<id>_<timestamp>.<ext>` en el mismo storage que el resto de archivos (`STORAGE_BACKEND`: disco o el bucket de MinIO) y devuelve `avatar_url`, absoluta sobre `MEDIA_PUBLIC_BASE_URL` (la app la carga directo). Al subir una nueva se borra la anterior. `cleanup_media` no toca `avatars/`.
 
 ## 🏗️ Arquitectura
 

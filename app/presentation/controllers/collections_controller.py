@@ -1,10 +1,11 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.dependencies import get_db, get_admin_user
 from app.core.media import save_image
+from app.core.media_usage import discard_media
 from app.domain.entities.collection import Collection, CollectionProduct
 from app.domain.entities.product import Product
 
@@ -145,12 +146,14 @@ async def update_collection(
     description: Optional[str] = Form(None),
     is_active: Optional[bool] = Form(None),
     image: Optional[UploadFile] = File(None),
+    background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db),
     _=Depends(get_admin_user),
 ):
     col = db.query(Collection).filter(Collection.id == col_id).first()
     if not col:
         raise HTTPException(status_code=404, detail="Colección no encontrada")
+    old_image = col.image_url
 
     if name is not None:        col.name = name
     if description is not None: col.description = description
@@ -158,16 +161,24 @@ async def update_collection(
     if image and image.filename: col.image_url = save_image(image, "collections")
 
     db.commit()
+    discard_media(db, background_tasks, old_image)
     return _to_dict(_load(db, col_id))
 
 
 @router.delete("/admin/{col_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_collection(col_id: int, db: Session = Depends(get_db), _=Depends(get_admin_user)):
+async def delete_collection(
+    col_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    _=Depends(get_admin_user),
+):
     col = db.query(Collection).filter(Collection.id == col_id).first()
     if not col:
         raise HTTPException(status_code=404, detail="Colección no encontrada")
+    old_image = col.image_url
     db.delete(col)
     db.commit()
+    discard_media(db, background_tasks, old_image)
 
 
 @router.post("/admin/{col_id}/products/{product_id}", status_code=status.HTTP_201_CREATED)

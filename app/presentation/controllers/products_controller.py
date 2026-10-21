@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy import func
@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.dependencies import get_db, get_admin_user
 from app.core.media import get_video_download_url, save_image, save_video
+from app.core.media_usage import discard_media
 from app.domain.entities.product import Product
 from app.domain.entities.category import Category
 from app.domain.entities.order import Order
@@ -288,12 +289,14 @@ async def update_product(
     is_active: Optional[bool] = Form(None),
     image: Optional[UploadFile] = File(None),
     video: Optional[UploadFile] = File(None),
+    background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db),
     _=Depends(get_admin_user),
 ):
     p = db.query(Product).filter(Product.id == product_id).first()
     if not p:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
+    old_media = (p.image_url, p.video_url)
 
     if name is not None:                p.name = name
     if price is not None:               p.price = price
@@ -309,6 +312,7 @@ async def update_product(
     if image and image.filename:        p.image_url = save_image(image, "products")
 
     db.commit()
+    discard_media(db, background_tasks, *old_media)
     db.refresh(p)
     return _to_dict(db.query(Product).options(joinedload(Product.category)).filter(Product.id == p.id).first())
 
@@ -356,9 +360,16 @@ async def set_featured(
 
 
 @router.delete("/admin/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_product(product_id: int, db: Session = Depends(get_db), _=Depends(get_admin_user)):
+async def delete_product(
+    product_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    _=Depends(get_admin_user),
+):
     p = db.query(Product).filter(Product.id == product_id).first()
     if not p:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
+    old_media = (p.image_url, p.video_url)
     db.delete(p)
     db.commit()
+    discard_media(db, background_tasks, *old_media)
