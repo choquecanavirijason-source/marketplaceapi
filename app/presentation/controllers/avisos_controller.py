@@ -6,6 +6,7 @@ token de dispositivo que la app recibió al iniciar sesión (device_token).
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Response
+from pydantic import BaseModel, StrictStr
 
 from app.core.salon_internal import device_request, raise_for_salon_error
 
@@ -36,4 +37,33 @@ def revocar_dispositivo(authorization: Optional[str] = Header(default=None)):
     # En ambos casos no queda nada que revocar: cerrar sesión no debe fallar.
     if r.status_code not in (401, 404):
         raise_for_salon_error(r, "No se pudo revocar el dispositivo")
+    return Response(status_code=204)
+
+
+class FcmTokenBody(BaseModel):
+    # Validación ligera (string); la estricta la hace elashesbackend.
+    fcm_token: StrictStr
+
+
+@router.put("/dispositivo/fcm-token", status_code=204)
+def registrar_fcm_token(body: FcmTokenBody, authorization: Optional[str] = Header(default=None)):
+    """Token de Firebase Cloud Messaging de este celular, para recibir
+    recordatorios con la app cerrada. Se reenvía al salón sin guardarlo aquí."""
+    r = device_request(
+        "PUT",
+        "/dispositivos/actual/fcm-token",
+        _require_authorization(authorization),
+        json={"fcm_token": body.fcm_token},
+    )
+    raise_for_salon_error(r, "No se pudo registrar el token de notificaciones")
+    return Response(status_code=204)
+
+
+@router.delete("/dispositivo/fcm-token", status_code=204)
+def borrar_fcm_token(authorization: Optional[str] = Header(default=None)):
+    r = device_request("DELETE", "/dispositivos/actual/fcm-token", _require_authorization(authorization))
+    # Igual que al revocar: 401 (token ya revocado) o 404 (avisos desactivados
+    # en el salón) significan que no hay nada que borrar; cerrar sesión no falla.
+    if r.status_code not in (401, 404):
+        raise_for_salon_error(r, "No se pudo borrar el token de notificaciones")
     return Response(status_code=204)
