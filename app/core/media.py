@@ -117,18 +117,24 @@ def _measure_rendition_bitrates(playlist_path: str) -> Tuple[int, int]:
 #     nitidez (resolución y bits por pixel ambos muy bajos).
 #   720px/CRF25/1100kbps -> confirmado en el celular real, fluido y buena
 #     calidad.
-#   720px/CRF23/1400kbps -> también confirmado fluido sin cortes.  <- ACTUAL
+#   720px/CRF23/1400kbps -> también confirmado fluido sin cortes.
 #   900px/CRF21/1800kbps -> volvió a laguear, ese salto fue demasiado grande.
-# bufsize = 1.5 × maxrate: algo de margen para escenas con movimiento sin
-# picos como los que cortaban la variante "high" de HLS.
-# Rama reels-prueba: misma resolución, más nitidez con un peso parecido:
-#   - CRF 21 (antes 23): el promedio real quedaba en ~0.86 Mbps, muy por
-#     debajo del tope de 1400k; había margen para más calidad.
-#   - preset "slow" (ver _compress_single_video): mejor compresión con el
-#     mismo peso, a costa de más tiempo de procesamiento en el VPS.
-#   - tope de 30 fps (ver max_fps): un video de 60 fps reparte los bits
-#     entre el doble de cuadros; a 30 cada cuadro sale más nítido.
-REEL_RENDITION = {"max_dim": 720, "crf": "21", "v_maxrate": "1400k", "v_bufsize": "2100k", "a_bitrate": "112k", "preset": "slow", "max_fps": "30"}
+# OJO: en ese historial "720px" era el lado LARGO (max_dim): un reel vertical
+# de 1080x1920 salía en 406x720, casi 360p, y por eso se veía borroso en el
+# celular aunque fluyera bien.
+#
+# Ahora el tope va sobre el lado CORTO (short_side): 720 real, o sea
+# 720x1280 en vertical. Medido sobre reels reales contra el original: 76 %
+# más peso (~1.6 Mbps) y 35 % menos distorsión (SSIM 0.971 -> 0.981) que el
+# 406x720. Sigue muy por debajo de los ~3-4 Mbps de la "high" de HLS que se
+# cortaba con wifi.
+#   - CRF 23 + preset "slow": mejor compresión con el mismo peso, a costa de
+#     algo más de tiempo de procesamiento en el VPS.
+#   - maxrate 2000k / bufsize 1.5 × maxrate: margen para escenas con
+#     movimiento sin picos como los que cortaban la "high" de HLS.
+#   - tope de 30 fps (max_fps): un video de 60 fps reparte los bits entre el
+#     doble de cuadros; a 30 cada cuadro sale más nítido.
+REEL_RENDITION = {"short_side": 720, "crf": "23", "v_maxrate": "2000k", "v_bufsize": "3000k", "a_bitrate": "112k", "preset": "slow", "max_fps": "30"}
 
 # Nombre del MP4 procesado dentro de la carpeta del reel:
 # .../videos/{uuid}/video.mp4 (mismo esquema de carpeta que el HLS, así
@@ -269,7 +275,13 @@ def _compress_single_video(source_path: str, output_path: str) -> bool:
         return False
     is_hdr = _is_hdr_source(source_path)
     rendition = REEL_RENDITION
-    scale = f"scale='min({rendition['max_dim']},iw)':'min({rendition['max_dim']},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
+    # El lado CORTO a short_side (sin agrandar videos más chicos) y el largo
+    # proporcional; -2 = par, como exige libx264. Vertical 1080x1920 ->
+    # 720x1280; horizontal 1920x1080 -> 1280x720.
+    side = rendition["short_side"]
+    scale = (
+        f"scale='if(gt(ih,iw),min({side},iw),-2)':'if(gt(ih,iw),-2,min({side},ih))'"
+    )
     if is_hdr:
         video_filter = (
             "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
