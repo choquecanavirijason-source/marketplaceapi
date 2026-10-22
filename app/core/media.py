@@ -121,7 +121,14 @@ def _measure_rendition_bitrates(playlist_path: str) -> Tuple[int, int]:
 #   900px/CRF21/1800kbps -> volvió a laguear, ese salto fue demasiado grande.
 # bufsize = 1.5 × maxrate: algo de margen para escenas con movimiento sin
 # picos como los que cortaban la variante "high" de HLS.
-REEL_RENDITION = {"max_dim": 720, "crf": "23", "v_maxrate": "1400k", "v_bufsize": "2100k", "a_bitrate": "112k"}
+# Rama reels-prueba: misma resolución, más nitidez con un peso parecido:
+#   - CRF 21 (antes 23): el promedio real quedaba en ~0.86 Mbps, muy por
+#     debajo del tope de 1400k; había margen para más calidad.
+#   - preset "slow" (ver _compress_single_video): mejor compresión con el
+#     mismo peso, a costa de más tiempo de procesamiento en el VPS.
+#   - tope de 30 fps (ver max_fps): un video de 60 fps reparte los bits
+#     entre el doble de cuadros; a 30 cada cuadro sale más nítido.
+REEL_RENDITION = {"max_dim": 720, "crf": "21", "v_maxrate": "1400k", "v_bufsize": "2100k", "a_bitrate": "112k", "preset": "slow", "max_fps": "30"}
 
 # Nombre del MP4 procesado dentro de la carpeta del reel:
 # .../videos/{uuid}/video.mp4 (mismo esquema de carpeta que el HLS, así
@@ -278,11 +285,14 @@ def _compress_single_video(source_path: str, output_path: str) -> bool:
                 "-vf", video_filter,
                 "-pix_fmt", "yuv420p",
                 "-fps_mode", "cfr",
-                "-c:v", "libx264", "-preset", "medium",
+                # Tope, no valor fijo: un video de 24/25/30 fps queda igual;
+                # solo baja los de más (60 fps) a max_fps.
+                "-fpsmax", rendition["max_fps"],
+                "-c:v", "libx264", "-preset", rendition["preset"],
                 "-crf", rendition["crf"], "-maxrate", rendition["v_maxrate"], "-bufsize", rendition["v_bufsize"],
-                # Keyframe cada 48 frames (~2 s): adelantar/atrasar en la barra
-                # cae siempre cerca de un keyframe, sin decodificar de más.
-                "-g", "48", "-keyint_min", "48",
+                # Keyframe cada 60 frames (2 s a 30 fps): adelantar/atrasar en
+                # la barra cae siempre cerca de un keyframe, sin decodificar de más.
+                "-g", "60", "-keyint_min", "60",
                 "-c:a", "aac", "-b:a", rendition["a_bitrate"], "-ac", "2",
                 "-movflags", "+faststart",
                 output_path,
