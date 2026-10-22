@@ -6,7 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.dependencies import get_db, get_admin_user
-from app.core.media import get_video_download_url, save_image, stage_video_upload
+from app.core.media import get_video_download_url, reel_preview_url, save_image, stage_video_upload
 from app.core.media_usage import discard_media
 from app.core.reel_processing import new_job_id, process_reel_in_background
 from app.domain.entities.customer import Customer
@@ -40,6 +40,8 @@ def _to_dict(
         "id": r.id,
         "video_url": r.video_url,
         "video_download_url": get_video_download_url(r.video_url),
+        # Para el admin (navegador de PC): ver REEL_PREVIEW_NAME en media.py.
+        "video_preview_url": reel_preview_url(r.video_url),
         "thumbnail_url": r.thumbnail_url,
         "caption": r.caption,
         "product_id": r.product_id,

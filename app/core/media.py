@@ -166,6 +166,11 @@ def reel_rendition() -> dict:
 # borrar/limpiar/descargar el original funcionan igual para los dos).
 REEL_MP4_NAME = "video.mp4"
 _PROCESSED_NAMES = ("master.m3u8", REEL_MP4_NAME)
+# Vista previa para el ADMIN (navegador de PC), al lado de video.mp4. Muchos
+# Chrome/Brave de escritorio no reproducen H.265 (depende de la placa de
+# video), así que con códec hevc se genera además esta versión chica en
+# H.264, que cualquier navegador reproduce. La app nunca la usa.
+REEL_PREVIEW_NAME = "preview.mp4"
 
 
 def _is_hdr_source(source_path: str) -> bool:
@@ -436,6 +441,43 @@ def save_video(file: UploadFile, subfolder: str = "products") -> str:
     return storage.public_url(f"{videos_key}/{filename}")
 
 
+def _make_admin_preview(video_path: str, preview_path: str) -> bool:
+    """REEL_PREVIEW_NAME a partir del MP4 ya procesado (ya en SDR, escalado y
+    con nitidez): lado corto a 480, H.264 rápido, audio copiado. Unos
+    segundos de proceso y ~0.5 Mbps."""
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", video_path,
+                "-vf", "scale='if(gt(ih,iw),min(480,iw),-2)':'if(gt(ih,iw),-2,min(480,ih))'",
+                "-pix_fmt", "yuv420p",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "27",
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                preview_path,
+            ],
+            capture_output=True,
+            timeout=600,
+        )
+        if result.returncode != 0:
+            print(f"[_make_admin_preview] ffmpeg falló: {result.stderr.decode(errors='replace')[-1000:]}")
+            return False
+        return True
+    except Exception as exc:
+        print(f"[_make_admin_preview] excepción: {exc!r}")
+        return False
+
+
+def reel_preview_url(video_url: Optional[str]) -> Optional[str]:
+    """URL de la vista previa del admin (ver REEL_PREVIEW_NAME) para un
+    video.mp4 de reel; para cualquier otro video, el mismo video. Reels en
+    H.264 o anteriores a esto no la tienen: el admin, si falla, prueba con
+    video_url."""
+    if video_url and video_url.endswith("/" + REEL_MP4_NAME):
+        return video_url[: -len(REEL_MP4_NAME)] + REEL_PREVIEW_NAME
+    return video_url or None
+
+
 def stage_video_upload(file: UploadFile) -> str:
     """Guarda el video subido en una carpeta temporal propia (no se borra al
     terminar la petición) y devuelve su ruta, para procesarlo después en
@@ -478,8 +520,13 @@ def process_reel_video(staged_path: str) -> str:
         _remux_faststart(staged_path)
         out_dir = os.path.join(work, name)
         os.makedirs(out_dir)
-        if not _compress_single_video(staged_path, os.path.join(out_dir, REEL_MP4_NAME)):
+        video_path = os.path.join(out_dir, REEL_MP4_NAME)
+        if not _compress_single_video(staged_path, video_path):
             raise RuntimeError("No se pudo procesar el video (ffmpeg falló).")
+        if reel_rendition()["codec"] != "libx264":
+            # Sin vista previa el reel funciona igual en la app: no es motivo
+            # para fallar el procesamiento.
+            _make_admin_preview(video_path, os.path.join(out_dir, REEL_PREVIEW_NAME))
         storage.put_dir(out_dir, f"{videos_key}/{name}", last=REEL_MP4_NAME)
         storage.put_file(staged_path, f"{videos_key}/{filename}")
     finally:
