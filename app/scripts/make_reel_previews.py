@@ -13,7 +13,10 @@ import subprocess
 import tempfile
 import urllib.request
 
-import main  # noqa: F401  carga todos los modelos, como el servidor
+import importlib
+import pkgutil
+
+import app.domain.entities as _entities
 from app.core import storage
 from app.core.media import (
     REEL_MP4_NAME,
@@ -27,6 +30,14 @@ from app.core.media import (
 )
 from app.domain.entities.reel import Reel
 from app.infrastructure.database.session import SessionLocal
+
+
+# Carga todos los modelos (las relaciones entre ellos se resuelven por
+# nombre). NO se importa main: eso vuelve a correr las migraciones, y una de
+# ellas marca como fallido cualquier reel que se esté procesando en ese
+# momento en el servidor.
+for _mod in pkgutil.iter_modules(_entities.__path__):
+    importlib.import_module(f"{_entities.__name__}.{_mod.name}")
 
 
 def _codec(url: str) -> str:
