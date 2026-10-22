@@ -17,5 +17,13 @@ class Reel(Base):
     is_active     = Column(Boolean, default=True, nullable=False)
     sort_order    = Column(Integer, default=0, nullable=False)
     created_at    = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Procesamiento del video en segundo plano (ver app/core/reel_processing.py):
+    # "ready" | "processing" | "failed". Mientras procesa, video_url es el
+    # video anterior (al reemplazarlo) o "" (reel nuevo, oculto en la app).
+    processing_status = Column(String(20), default="ready", nullable=False)
+    processing_error  = Column(String(300), nullable=True)
+    # Id del procesamiento vigente: si el admin sube otro video antes de que
+    # termine el anterior, el resultado del viejo se descarta.
+    processing_job    = Column(String(40), nullable=True)
 
     product = relationship("Product", lazy="joined")

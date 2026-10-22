@@ -134,7 +134,32 @@ def _measure_rendition_bitrates(playlist_path: str) -> Tuple[int, int]:
 #     movimiento sin picos como los que cortaban la "high" de HLS.
 #   - tope de 30 fps (max_fps): un video de 60 fps reparte los bits entre el
 #     doble de cuadros; a 30 cada cuadro sale más nítido.
-REEL_RENDITION = {"short_side": 720, "crf": "23", "v_maxrate": "2000k", "v_bufsize": "3000k", "a_bitrate": "112k", "preset": "slow", "max_fps": "30"}
+#
+# "hevc" (H.265, el que se usa por defecto, ver settings.reels_video_codec):
+# comprime ~35-40 % mejor, así que da 1080 real con el peso del 720 en
+# H.264. Medido sobre el mismo reel de 32 s: 1.68 Mbps contra 1.64, y SSIM
+# a 1080 de 0.984 contra 0.978 (~25 % menos distorsión). A cambio tarda ~7
+# veces más en procesar (minutos en el VPS): por eso los reels se procesan
+# en segundo plano (app/core/reel_processing.py). x265 usa su propia escala
+# de CRF: 26 en x265 rinde parecido a 23 en x264. tag "hvc1": sin eso iOS
+# no reproduce el MP4.
+REEL_RENDITIONS = {
+    "h264": {"codec": "libx264", "short_side": 720, "crf": "23", "v_maxrate": "2000k", "v_bufsize": "3000k", "preset": "slow"},
+    "hevc": {"codec": "libx265", "short_side": 1080, "crf": "26", "v_maxrate": "2000k", "v_bufsize": "3000k", "preset": "medium"},
+}
+REEL_AUDIO_BITRATE = "112k"
+REEL_MAX_FPS = "30"
+# Nitidez suave después de escalar (settings.reels_sharpen): realza bordes
+# finos (pestañas, pelo) sin halos visibles; casi no suma peso.
+REEL_SHARPEN_FILTER = "unsharp=5:5:0.6:5:5:0"
+
+
+def reel_rendition() -> dict:
+    """Configuración vigente del MP4 de reels, según settings."""
+    from app.config.settings import settings
+
+    codec = (settings.reels_video_codec or "").strip().lower()
+    return REEL_RENDITIONS.get(codec, REEL_RENDITIONS["h264"])
 
 # Nombre del MP4 procesado dentro de la carpeta del reel:
 # .../videos/{uuid}/video.mp4 (mismo esquema de carpeta que el HLS, así
@@ -268,20 +293,24 @@ def _compress_single_video(source_path: str, output_path: str) -> bool:
     de bajar completo (rápido, siendo corto), adelantar/atrasar es
     instantáneo siempre — cero pedidos de red de por medio.
 
-    Usa REEL_RENDITION (más liviana que "high" de HLS_RENDITIONS, ver su
-    comentario) y las mismas correcciones (HDR->SDR, dimensiones pares, fps
-    constante)."""
+    Usa reel_rendition() (más liviana que "high" de HLS_RENDITIONS, ver
+    REEL_RENDITIONS) y las mismas correcciones (HDR->SDR, dimensiones pares,
+    fps constante)."""
     if not shutil.which("ffmpeg"):
         return False
+    from app.config.settings import settings
+
     is_hdr = _is_hdr_source(source_path)
-    rendition = REEL_RENDITION
+    rendition = reel_rendition()
     # El lado CORTO a short_side (sin agrandar videos más chicos) y el largo
-    # proporcional; -2 = par, como exige libx264. Vertical 1080x1920 ->
-    # 720x1280; horizontal 1920x1080 -> 1280x720.
+    # proporcional; -2 = par, como exigen libx264/libx265. Con short_side 720:
+    # vertical 1080x1920 -> 720x1280; horizontal 1920x1080 -> 1280x720.
     side = rendition["short_side"]
     scale = (
         f"scale='if(gt(ih,iw),min({side},iw),-2)':'if(gt(ih,iw),-2,min({side},ih))'"
     )
+    if settings.reels_sharpen:
+        scale = f"{scale},{REEL_SHARPEN_FILTER}"
     if is_hdr:
         video_filter = (
             "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
@@ -290,6 +319,22 @@ def _compress_single_video(source_path: str, output_path: str) -> bool:
         )
     else:
         video_filter = scale
+    # Keyframe cada 60 frames (2 s a 30 fps): adelantar/atrasar en la barra
+    # cae siempre cerca de un keyframe, sin decodificar de más.
+    if rendition["codec"] == "libx265":
+        codec_args = [
+            "-c:v", "libx265", "-preset", rendition["preset"], "-crf", rendition["crf"],
+            "-x265-params",
+            f"vbv-maxrate={rendition['v_maxrate'].rstrip('k')}:vbv-bufsize={rendition['v_bufsize'].rstrip('k')}"
+            ":keyint=60:min-keyint=60:log-level=error",
+            "-tag:v", "hvc1",
+        ]
+    else:
+        codec_args = [
+            "-c:v", "libx264", "-preset", rendition["preset"], "-crf", rendition["crf"],
+            "-maxrate", rendition["v_maxrate"], "-bufsize", rendition["v_bufsize"],
+            "-g", "60", "-keyint_min", "60",
+        ]
     try:
         result = subprocess.run(
             [
@@ -298,19 +343,16 @@ def _compress_single_video(source_path: str, output_path: str) -> bool:
                 "-pix_fmt", "yuv420p",
                 "-fps_mode", "cfr",
                 # Tope, no valor fijo: un video de 24/25/30 fps queda igual;
-                # solo baja los de más (60 fps) a max_fps.
-                "-fpsmax", rendition["max_fps"],
-                "-c:v", "libx264", "-preset", rendition["preset"],
-                "-crf", rendition["crf"], "-maxrate", rendition["v_maxrate"], "-bufsize", rendition["v_bufsize"],
-                # Keyframe cada 60 frames (2 s a 30 fps): adelantar/atrasar en
-                # la barra cae siempre cerca de un keyframe, sin decodificar de más.
-                "-g", "60", "-keyint_min", "60",
-                "-c:a", "aac", "-b:a", rendition["a_bitrate"], "-ac", "2",
+                # solo baja los de más (60 fps) a REEL_MAX_FPS.
+                "-fpsmax", REEL_MAX_FPS,
+                *codec_args,
+                "-c:a", "aac", "-b:a", REEL_AUDIO_BITRATE, "-ac", "2",
                 "-movflags", "+faststart",
                 output_path,
             ],
             capture_output=True,
-            timeout=600,
+            # H.265 de un reel largo en el VPS puede pasar los 10 minutos.
+            timeout=1800,
         )
         if result.returncode != 0:
             print(
@@ -392,6 +434,57 @@ def save_video(file: UploadFile, subfolder: str = "products") -> str:
     if ok:
         return storage.public_url(f"{videos_key}/{name}/{processed}")
     return storage.public_url(f"{videos_key}/{filename}")
+
+
+def stage_video_upload(file: UploadFile) -> str:
+    """Guarda el video subido en una carpeta temporal propia (no se borra al
+    terminar la petición) y devuelve su ruta, para procesarlo después en
+    segundo plano con process_reel_video. Valida formato y tamaño acá, así
+    el admin ve el error en la misma respuesta."""
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in ALLOWED_VIDEO_EXT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Formato de video no permitido. Usa: {', '.join(ALLOWED_VIDEO_EXT)}",
+        )
+    work = tempfile.mkdtemp(prefix="reel_upload_")
+    path = os.path.join(work, f"upload{ext}")
+    try:
+        _write_upload(file, path, MAX_VIDEO_SIZE_BYTES, "El video")
+    except Exception:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+    return path
+
+
+def discard_staged_upload(staged_path: str) -> None:
+    shutil.rmtree(os.path.dirname(staged_path), ignore_errors=True)
+
+
+def process_reel_video(staged_path: str) -> str:
+    """Procesa un video ya guardado con stage_video_upload como MP4 de reel
+    (ver reel_rendition) y lo sube al storage junto con el original de
+    respaldo, igual que save_video(..., "reels"). Devuelve la URL pública
+    del MP4. Lanza RuntimeError si ffmpeg falla: a diferencia de save_video,
+    NO cae al original crudo (un .mov HDR del iPhone ni siquiera reproduce
+    bien en muchos celulares); el reel queda marcado como fallido.
+    Borra siempre la carpeta temporal del upload."""
+    ext = os.path.splitext(staged_path)[1].lower()
+    name = uuid.uuid4().hex
+    filename = f"{name}{ext}"
+    videos_key = "marketplace/reels/videos"
+    work = os.path.dirname(staged_path)
+    try:
+        _remux_faststart(staged_path)
+        out_dir = os.path.join(work, name)
+        os.makedirs(out_dir)
+        if not _compress_single_video(staged_path, os.path.join(out_dir, REEL_MP4_NAME)):
+            raise RuntimeError("No se pudo procesar el video (ffmpeg falló).")
+        storage.put_dir(out_dir, f"{videos_key}/{name}", last=REEL_MP4_NAME)
+        storage.put_file(staged_path, f"{videos_key}/{filename}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return storage.public_url(f"{videos_key}/{name}/{REEL_MP4_NAME}")
 
 
 def _processed_dir_key(key: str) -> Optional[str]:

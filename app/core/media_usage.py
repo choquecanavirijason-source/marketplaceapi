@@ -54,3 +54,14 @@ def discard_media(db: Session, background_tasks: BackgroundTasks, *urls) -> None
     ]
     if unused:
         background_tasks.add_task(delete_media, *unused)
+
+
+def discard_media_now(db: Session, *urls) -> None:
+    """Igual que discard_media, pero borra en el momento: para código que ya
+    corre fuera de una petición (procesamiento de reels en segundo plano)."""
+    unused = [
+        url for url in dict.fromkeys(urls)
+        if is_managed_media(url) and not _is_referenced(db, url)
+    ]
+    if unused:
+        delete_media(*unused)
