@@ -88,13 +88,17 @@ def ensure_salon_link(db, customer) -> str:
     return link_status
 
 
-def device_request(method: str, path: str, authorization: str) -> httpx.Response:
-    """Reenvía una petición autenticada con el token de dispositivo."""
+def device_request(
+    method: str, path: str, authorization: str, json: Optional[dict] = None
+) -> httpx.Response:
+    """Reenvía una petición autenticada con el token de dispositivo (y su
+    cuerpo JSON, si lo tiene). No guarda ni registra nada de lo reenviado."""
     try:
         return httpx.request(
             method,
             f"{_SALON_BACKEND_URL}{path}",
             headers={"Authorization": authorization},
+            json=json,
             timeout=8.0,
         )
     except Exception:
