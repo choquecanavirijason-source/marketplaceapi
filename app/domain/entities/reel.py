@@ -25,5 +25,8 @@ class Reel(Base):
     # Id del procesamiento vigente: si el admin sube otro video antes de que
     # termine el anterior, el resultado del viejo se descarta.
     processing_job    = Column(String(40), nullable=True)
+    # Versión liviana del video para datos móviles (media.REEL_SD_NAME). None
+    # en reels viejos o links externos: la app usa video_url.
+    video_sd_url      = Column(String(500), nullable=True)
 
     product = relationship("Product", lazy="joined")

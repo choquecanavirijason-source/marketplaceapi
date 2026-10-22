@@ -1,5 +1,9 @@
-"""Genera la vista previa del admin (REEL_PREVIEW_NAME, H.264 480p) para los
-reels en H.265 subidos antes de que existiera. Los nuevos ya la traen.
+"""Completa los reels en MP4 subidos antes de que existieran:
+  - la vista previa del admin (REEL_PREVIEW_NAME, H.264 480p), si el reel
+    está en H.265;
+  - la versión liviana para datos móviles (REEL_SD_NAME), si no la tiene.
+Los nuevos ya traen las dos. Se puede correr las veces que haga falta: lo
+que ya existe se saltea.
 
 Uso (en el servidor):
     docker exec marketplace-api python -m app.scripts.make_reel_previews
@@ -14,8 +18,12 @@ from app.core import storage
 from app.core.media import (
     REEL_MP4_NAME,
     REEL_PREVIEW_NAME,
+    REEL_SD_NAME,
+    _compress_single_video,
     _make_admin_preview,
     _url_to_key,
+    get_video_download_url,
+    reel_rendition,
 )
 from app.domain.entities.reel import Reel
 from app.infrastructure.database.session import SessionLocal
@@ -29,6 +37,43 @@ def _codec(url: str) -> str:
     ).stdout.strip()
 
 
+def _ensure_preview(reel: Reel, folder_key: str, work: str) -> None:
+    preview_key = folder_key + REEL_PREVIEW_NAME
+    if storage.list_keys(preview_key):
+        return
+    if _codec(reel.video_url) != "hevc":
+        return
+    src = os.path.join(work, REEL_MP4_NAME)
+    if not os.path.exists(src):
+        urllib.request.urlretrieve(reel.video_url, src)
+    dst = os.path.join(work, REEL_PREVIEW_NAME)
+    if _make_admin_preview(src, dst):
+        storage.put_file(dst, preview_key)
+        print(f"reel {reel.id}: vista previa creada")
+    else:
+        print(f"reel {reel.id}: no se pudo crear la vista previa")
+
+
+def _ensure_sd(db, reel: Reel, folder_key: str, work: str) -> None:
+    if reel.video_sd_url:
+        return
+    sd_key = folder_key + REEL_SD_NAME
+    if not storage.list_keys(sd_key):
+        # Mejor desde el original (una sola recompresión); si no está, desde
+        # el MP4 ya procesado.
+        source_url = get_video_download_url(reel.video_url) or reel.video_url
+        src = os.path.join(work, "source" + os.path.splitext(source_url)[1])
+        urllib.request.urlretrieve(source_url, src)
+        dst = os.path.join(work, REEL_SD_NAME)
+        if not _compress_single_video(src, dst, reel_rendition(sd=True)):
+            print(f"reel {reel.id}: no se pudo crear la versión liviana")
+            return
+        storage.put_file(dst, sd_key)
+    reel.video_sd_url = storage.public_url(sd_key)
+    db.commit()
+    print(f"reel {reel.id}: versión liviana lista")
+
+
 def run() -> None:
     db = SessionLocal()
     try:
@@ -37,23 +82,10 @@ def run() -> None:
             video_key = _url_to_key(reel.video_url)
             if video_key is None:
                 continue
-            preview_key = video_key[: -len(REEL_MP4_NAME)] + REEL_PREVIEW_NAME
-            if storage.list_keys(preview_key):
-                print(f"reel {reel.id}: ya tiene vista previa")
-                continue
-            codec = _codec(reel.video_url)
-            if codec != "hevc":
-                print(f"reel {reel.id}: {codec or '?'}, no hace falta")
-                continue
+            folder_key = video_key[: -len(REEL_MP4_NAME)]
             with tempfile.TemporaryDirectory() as work:
-                src = os.path.join(work, REEL_MP4_NAME)
-                dst = os.path.join(work, REEL_PREVIEW_NAME)
-                urllib.request.urlretrieve(reel.video_url, src)
-                if _make_admin_preview(src, dst):
-                    storage.put_file(dst, preview_key)
-                    print(f"reel {reel.id}: vista previa creada")
-                else:
-                    print(f"reel {reel.id}: no se pudo crear la vista previa")
+                _ensure_preview(reel, folder_key, work)
+                _ensure_sd(db, reel, folder_key, work)
     finally:
         db.close()
 

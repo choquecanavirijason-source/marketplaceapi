@@ -15,6 +15,8 @@ def upgrade():
         ))
         conn.execute(text("ALTER TABLE mp_reels ADD COLUMN IF NOT EXISTS processing_error VARCHAR(300)"))
         conn.execute(text("ALTER TABLE mp_reels ADD COLUMN IF NOT EXISTS processing_job VARCHAR(40)"))
+        # Versión liviana del video para datos móviles (ver media.REEL_SD_NAME).
+        conn.execute(text("ALTER TABLE mp_reels ADD COLUMN IF NOT EXISTS video_sd_url VARCHAR(500)"))
         # Un procesamiento en curso no sobrevive a un reinicio del servidor
         # (el archivo subido vivía en una carpeta temporal del contenedor):
         # se marca como fallido para que el admin vuelva a subir el video,
@@ -24,4 +26,4 @@ def upgrade():
             "processing_error = 'Se reinició el servidor mientras se procesaba: vuelve a subir el video.' "
             "WHERE processing_status = 'processing'"
         ))
-    print("[OK] mp_reels: processing_status/processing_error/processing_job")
+    print("[OK] mp_reels: processing_status/processing_error/processing_job/video_sd_url")

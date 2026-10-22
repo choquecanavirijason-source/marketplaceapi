@@ -42,6 +42,8 @@ def _to_dict(
         "video_download_url": get_video_download_url(r.video_url),
         # Para el admin (navegador de PC): ver REEL_PREVIEW_NAME en media.py.
         "video_preview_url": reel_preview_url(r.video_url),
+        # Para la app con datos móviles: ver REEL_SD_NAME en media.py.
+        "video_sd_url": r.video_sd_url,
         "thumbnail_url": r.thumbnail_url,
         "caption": r.caption,
         "product_id": r.product_id,
@@ -305,6 +307,7 @@ async def update_reel(
         # Link pegado a mano: reemplaza al instante y cancela cualquier
         # procesamiento pendiente (su resultado se descarta).
         reel.video_url = video_url
+        reel.video_sd_url = None
         reel.processing_status = "ready"
         reel.processing_error = None
         reel.processing_job = None

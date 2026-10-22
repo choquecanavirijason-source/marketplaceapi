@@ -45,7 +45,7 @@ def process_reel_in_background(reel_id: int, job_id: str, staged_path: str) -> N
                 discard_staged_upload(staged_path)
                 return
             try:
-                url = process_reel_video(staged_path)
+                url, sd_url = process_reel_video(staged_path)
             except Exception as exc:
                 print(f"[reel_processing] reel {reel_id}: {exc!r}")
                 _mark_failed(db, reel_id, job_id, str(exc) or type(exc).__name__)
@@ -53,11 +53,13 @@ def process_reel_in_background(reel_id: int, job_id: str, staged_path: str) -> N
 
         reel = db.query(Reel).filter(Reel.id == reel_id).first()
         if reel is None or reel.processing_job != job_id:
-            # Se borró el reel o llegó otro video mientras procesaba.
+            # Se borró el reel o llegó otro video mientras procesaba (la
+            # versión liviana vive en la misma carpeta y se borra con él).
             delete_media(url)
             return
         old_url = reel.video_url
         reel.video_url = url
+        reel.video_sd_url = sd_url
         reel.processing_status = "ready"
         reel.processing_error = None
         reel.processing_job = None

@@ -147,6 +147,14 @@ REEL_RENDITIONS = {
     "h264": {"codec": "libx264", "short_side": 720, "crf": "23", "v_maxrate": "2000k", "v_bufsize": "3000k", "preset": "slow"},
     "hevc": {"codec": "libx265", "short_side": 1080, "crf": "26", "v_maxrate": "2000k", "v_bufsize": "3000k", "preset": "medium"},
 }
+# Versión LIVIANA para datos móviles (la app la elige al cargar cada reel si
+# no está en wifi, ver video_sd_url): menos de la mitad de peso que la
+# principal. Con datos la conexión sube y baja, y los ~1.7-1.9 Mbps del
+# 1080 a veces no se sostienen; esta queda en ~0.8 Mbps.
+REEL_SD_RENDITIONS = {
+    "h264": {"codec": "libx264", "short_side": 540, "crf": "25", "v_maxrate": "1000k", "v_bufsize": "1500k", "preset": "slow"},
+    "hevc": {"codec": "libx265", "short_side": 720, "crf": "28", "v_maxrate": "1000k", "v_bufsize": "1500k", "preset": "medium"},
+}
 REEL_AUDIO_BITRATE = "112k"
 REEL_MAX_FPS = "30"
 # Nitidez suave después de escalar (settings.reels_sharpen): realza bordes
@@ -154,12 +162,14 @@ REEL_MAX_FPS = "30"
 REEL_SHARPEN_FILTER = "unsharp=5:5:0.6:5:5:0"
 
 
-def reel_rendition() -> dict:
-    """Configuración vigente del MP4 de reels, según settings."""
+def reel_rendition(sd: bool = False) -> dict:
+    """Configuración vigente del MP4 de reels (o de su versión liviana, con
+    sd=True), según settings."""
     from app.config.settings import settings
 
     codec = (settings.reels_video_codec or "").strip().lower()
-    return REEL_RENDITIONS.get(codec, REEL_RENDITIONS["h264"])
+    table = REEL_SD_RENDITIONS if sd else REEL_RENDITIONS
+    return table.get(codec, table["h264"])
 
 # Nombre del MP4 procesado dentro de la carpeta del reel:
 # .../videos/{uuid}/video.mp4 (mismo esquema de carpeta que el HLS, así
@@ -171,6 +181,8 @@ _PROCESSED_NAMES = ("master.m3u8", REEL_MP4_NAME)
 # video), así que con códec hevc se genera además esta versión chica en
 # H.264, que cualquier navegador reproduce. La app nunca la usa.
 REEL_PREVIEW_NAME = "preview.mp4"
+# Versión liviana para datos móviles (REEL_SD_RENDITIONS), al lado de video.mp4.
+REEL_SD_NAME = "video_sd.mp4"
 
 
 def _is_hdr_source(source_path: str) -> bool:
@@ -288,7 +300,7 @@ def _generate_hls(source_path: str, out_dir: str) -> bool:
         return False
 
 
-def _compress_single_video(source_path: str, output_path: str) -> bool:
+def _compress_single_video(source_path: str, output_path: str, rendition: Optional[dict] = None) -> bool:
     """Recodifica a un único MP4 bien comprimido, SIN trocear en HLS.
 
     Para reels (típicamente cortos, 15-40s): con HLS, saltar hacia atrás en
@@ -306,7 +318,7 @@ def _compress_single_video(source_path: str, output_path: str) -> bool:
     from app.config.settings import settings
 
     is_hdr = _is_hdr_source(source_path)
-    rendition = reel_rendition()
+    rendition = rendition or reel_rendition()
     # El lado CORTO a short_side (sin agrandar videos más chicos) y el largo
     # proporcional; -2 = par, como exigen libx264/libx265. Con short_side 720:
     # vertical 1080x1920 -> 720x1280; horizontal 1920x1080 -> 1280x720.
@@ -503,11 +515,13 @@ def discard_staged_upload(staged_path: str) -> None:
     shutil.rmtree(os.path.dirname(staged_path), ignore_errors=True)
 
 
-def process_reel_video(staged_path: str) -> str:
+def process_reel_video(staged_path: str) -> Tuple[str, Optional[str]]:
     """Procesa un video ya guardado con stage_video_upload como MP4 de reel
-    (ver reel_rendition) y lo sube al storage junto con el original de
-    respaldo, igual que save_video(..., "reels"). Devuelve la URL pública
-    del MP4. Lanza RuntimeError si ffmpeg falla: a diferencia de save_video,
+    (ver reel_rendition) más su versión liviana para datos móviles, y los
+    sube al storage junto con el original de respaldo. Devuelve (URL del
+    MP4, URL de la versión liviana o None si no se pudo generar: el reel
+    funciona igual, solo que con datos usa la principal). Lanza
+    RuntimeError si falla el MP4 principal: a diferencia de save_video,
     NO cae al original crudo (un .mov HDR del iPhone ni siquiera reproduce
     bien en muchos celulares); el reel queda marcado como fallido.
     Borra siempre la carpeta temporal del upload."""
@@ -523,6 +537,10 @@ def process_reel_video(staged_path: str) -> str:
         video_path = os.path.join(out_dir, REEL_MP4_NAME)
         if not _compress_single_video(staged_path, video_path):
             raise RuntimeError("No se pudo procesar el video (ffmpeg falló).")
+        # Desde el original (no desde video.mp4): una sola recompresión.
+        has_sd = _compress_single_video(
+            staged_path, os.path.join(out_dir, REEL_SD_NAME), reel_rendition(sd=True)
+        )
         if reel_rendition()["codec"] != "libx264":
             # Sin vista previa el reel funciona igual en la app: no es motivo
             # para fallar el procesamiento.
@@ -531,7 +549,8 @@ def process_reel_video(staged_path: str) -> str:
         storage.put_file(staged_path, f"{videos_key}/{filename}")
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    return storage.public_url(f"{videos_key}/{name}/{REEL_MP4_NAME}")
+    sd_url = storage.public_url(f"{videos_key}/{name}/{REEL_SD_NAME}") if has_sd else None
+    return storage.public_url(f"{videos_key}/{name}/{REEL_MP4_NAME}"), sd_url
 
 
 def _processed_dir_key(key: str) -> Optional[str]:
