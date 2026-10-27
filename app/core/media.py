@@ -117,17 +117,72 @@ def _measure_rendition_bitrates(playlist_path: str) -> Tuple[int, int]:
 #     nitidez (resolución y bits por pixel ambos muy bajos).
 #   720px/CRF25/1100kbps -> confirmado en el celular real, fluido y buena
 #     calidad.
-#   720px/CRF23/1400kbps -> también confirmado fluido sin cortes.  <- ACTUAL
+#   720px/CRF23/1400kbps -> también confirmado fluido sin cortes.
 #   900px/CRF21/1800kbps -> volvió a laguear, ese salto fue demasiado grande.
-# bufsize = 1.5 × maxrate: algo de margen para escenas con movimiento sin
-# picos como los que cortaban la variante "high" de HLS.
-REEL_RENDITION = {"max_dim": 720, "crf": "23", "v_maxrate": "1400k", "v_bufsize": "2100k", "a_bitrate": "112k"}
+# OJO: en ese historial "720px" era el lado LARGO (max_dim): un reel vertical
+# de 1080x1920 salía en 406x720, casi 360p, y por eso se veía borroso en el
+# celular aunque fluyera bien.
+#
+# Ahora el tope va sobre el lado CORTO (short_side): 720 real, o sea
+# 720x1280 en vertical. Medido sobre reels reales contra el original: 76 %
+# más peso (~1.6 Mbps) y 35 % menos distorsión (SSIM 0.971 -> 0.981) que el
+# 406x720. Sigue muy por debajo de los ~3-4 Mbps de la "high" de HLS que se
+# cortaba con wifi.
+#   - CRF 23 + preset "slow": mejor compresión con el mismo peso, a costa de
+#     algo más de tiempo de procesamiento en el VPS.
+#   - maxrate 2000k / bufsize 1.5 × maxrate: margen para escenas con
+#     movimiento sin picos como los que cortaban la "high" de HLS.
+#   - tope de 30 fps (max_fps): un video de 60 fps reparte los bits entre el
+#     doble de cuadros; a 30 cada cuadro sale más nítido.
+#
+# "hevc" (H.265, el que se usa por defecto, ver settings.reels_video_codec):
+# comprime ~35-40 % mejor, así que da 1080 real con el peso del 720 en
+# H.264. Medido sobre el mismo reel de 32 s: 1.68 Mbps contra 1.64, y SSIM
+# a 1080 de 0.984 contra 0.978 (~25 % menos distorsión). A cambio tarda ~7
+# veces más en procesar (minutos en el VPS): por eso los reels se procesan
+# en segundo plano (app/core/reel_processing.py). x265 usa su propia escala
+# de CRF: 26 en x265 rinde parecido a 23 en x264. tag "hvc1": sin eso iOS
+# no reproduce el MP4.
+REEL_RENDITIONS = {
+    "h264": {"codec": "libx264", "short_side": 720, "crf": "23", "v_maxrate": "2000k", "v_bufsize": "3000k", "preset": "slow"},
+    "hevc": {"codec": "libx265", "short_side": 1080, "crf": "26", "v_maxrate": "2000k", "v_bufsize": "3000k", "preset": "medium"},
+}
+# Versión LIVIANA para datos móviles (la app la elige al cargar cada reel si
+# no está en wifi, ver video_sd_url): menos de la mitad de peso que la
+# principal. Con datos la conexión sube y baja, y los ~1.7-1.9 Mbps del
+# 1080 a veces no se sostienen; esta queda en ~0.8 Mbps.
+REEL_SD_RENDITIONS = {
+    "h264": {"codec": "libx264", "short_side": 540, "crf": "25", "v_maxrate": "1000k", "v_bufsize": "1500k", "preset": "slow"},
+    "hevc": {"codec": "libx265", "short_side": 720, "crf": "28", "v_maxrate": "1000k", "v_bufsize": "1500k", "preset": "medium"},
+}
+REEL_AUDIO_BITRATE = "112k"
+REEL_MAX_FPS = "30"
+# Nitidez suave después de escalar (settings.reels_sharpen): realza bordes
+# finos (pestañas, pelo) sin halos visibles; casi no suma peso.
+REEL_SHARPEN_FILTER = "unsharp=5:5:0.6:5:5:0"
+
+
+def reel_rendition(sd: bool = False) -> dict:
+    """Configuración vigente del MP4 de reels (o de su versión liviana, con
+    sd=True), según settings."""
+    from app.config.settings import settings
+
+    codec = (settings.reels_video_codec or "").strip().lower()
+    table = REEL_SD_RENDITIONS if sd else REEL_RENDITIONS
+    return table.get(codec, table["h264"])
 
 # Nombre del MP4 procesado dentro de la carpeta del reel:
 # .../videos/{uuid}/video.mp4 (mismo esquema de carpeta que el HLS, así
 # borrar/limpiar/descargar el original funcionan igual para los dos).
 REEL_MP4_NAME = "video.mp4"
 _PROCESSED_NAMES = ("master.m3u8", REEL_MP4_NAME)
+# Vista previa para el ADMIN (navegador de PC), al lado de video.mp4. Muchos
+# Chrome/Brave de escritorio no reproducen H.265 (depende de la placa de
+# video), así que con códec hevc se genera además esta versión chica en
+# H.264, que cualquier navegador reproduce. La app nunca la usa.
+REEL_PREVIEW_NAME = "preview.mp4"
+# Versión liviana para datos móviles (REEL_SD_RENDITIONS), al lado de video.mp4.
+REEL_SD_NAME = "video_sd.mp4"
 
 
 def _is_hdr_source(source_path: str) -> bool:
@@ -245,7 +300,7 @@ def _generate_hls(source_path: str, out_dir: str) -> bool:
         return False
 
 
-def _compress_single_video(source_path: str, output_path: str) -> bool:
+def _compress_single_video(source_path: str, output_path: str, rendition: Optional[dict] = None) -> bool:
     """Recodifica a un único MP4 bien comprimido, SIN trocear en HLS.
 
     Para reels (típicamente cortos, 15-40s): con HLS, saltar hacia atrás en
@@ -255,14 +310,24 @@ def _compress_single_video(source_path: str, output_path: str) -> bool:
     de bajar completo (rápido, siendo corto), adelantar/atrasar es
     instantáneo siempre — cero pedidos de red de por medio.
 
-    Usa REEL_RENDITION (más liviana que "high" de HLS_RENDITIONS, ver su
-    comentario) y las mismas correcciones (HDR->SDR, dimensiones pares, fps
-    constante)."""
+    Usa reel_rendition() (más liviana que "high" de HLS_RENDITIONS, ver
+    REEL_RENDITIONS) y las mismas correcciones (HDR->SDR, dimensiones pares,
+    fps constante)."""
     if not shutil.which("ffmpeg"):
         return False
+    from app.config.settings import settings
+
     is_hdr = _is_hdr_source(source_path)
-    rendition = REEL_RENDITION
-    scale = f"scale='min({rendition['max_dim']},iw)':'min({rendition['max_dim']},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
+    rendition = rendition or reel_rendition()
+    # El lado CORTO a short_side (sin agrandar videos más chicos) y el largo
+    # proporcional; -2 = par, como exigen libx264/libx265. Con short_side 720:
+    # vertical 1080x1920 -> 720x1280; horizontal 1920x1080 -> 1280x720.
+    side = rendition["short_side"]
+    scale = (
+        f"scale='if(gt(ih,iw),min({side},iw),-2)':'if(gt(ih,iw),-2,min({side},ih))'"
+    )
+    if settings.reels_sharpen:
+        scale = f"{scale},{REEL_SHARPEN_FILTER}"
     if is_hdr:
         video_filter = (
             "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
@@ -271,6 +336,22 @@ def _compress_single_video(source_path: str, output_path: str) -> bool:
         )
     else:
         video_filter = scale
+    # Keyframe cada 60 frames (2 s a 30 fps): adelantar/atrasar en la barra
+    # cae siempre cerca de un keyframe, sin decodificar de más.
+    if rendition["codec"] == "libx265":
+        codec_args = [
+            "-c:v", "libx265", "-preset", rendition["preset"], "-crf", rendition["crf"],
+            "-x265-params",
+            f"vbv-maxrate={rendition['v_maxrate'].rstrip('k')}:vbv-bufsize={rendition['v_bufsize'].rstrip('k')}"
+            ":keyint=60:min-keyint=60:log-level=error",
+            "-tag:v", "hvc1",
+        ]
+    else:
+        codec_args = [
+            "-c:v", "libx264", "-preset", rendition["preset"], "-crf", rendition["crf"],
+            "-maxrate", rendition["v_maxrate"], "-bufsize", rendition["v_bufsize"],
+            "-g", "60", "-keyint_min", "60",
+        ]
     try:
         result = subprocess.run(
             [
@@ -278,17 +359,17 @@ def _compress_single_video(source_path: str, output_path: str) -> bool:
                 "-vf", video_filter,
                 "-pix_fmt", "yuv420p",
                 "-fps_mode", "cfr",
-                "-c:v", "libx264", "-preset", "medium",
-                "-crf", rendition["crf"], "-maxrate", rendition["v_maxrate"], "-bufsize", rendition["v_bufsize"],
-                # Keyframe cada 48 frames (~2 s): adelantar/atrasar en la barra
-                # cae siempre cerca de un keyframe, sin decodificar de más.
-                "-g", "48", "-keyint_min", "48",
-                "-c:a", "aac", "-b:a", rendition["a_bitrate"], "-ac", "2",
+                # Tope, no valor fijo: un video de 24/25/30 fps queda igual;
+                # solo baja los de más (60 fps) a REEL_MAX_FPS.
+                "-fpsmax", REEL_MAX_FPS,
+                *codec_args,
+                "-c:a", "aac", "-b:a", REEL_AUDIO_BITRATE, "-ac", "2",
                 "-movflags", "+faststart",
                 output_path,
             ],
             capture_output=True,
-            timeout=600,
+            # H.265 de un reel largo en el VPS puede pasar los 10 minutos.
+            timeout=1800,
         )
         if result.returncode != 0:
             print(
@@ -370,6 +451,106 @@ def save_video(file: UploadFile, subfolder: str = "products") -> str:
     if ok:
         return storage.public_url(f"{videos_key}/{name}/{processed}")
     return storage.public_url(f"{videos_key}/{filename}")
+
+
+def _make_admin_preview(video_path: str, preview_path: str) -> bool:
+    """REEL_PREVIEW_NAME a partir del MP4 ya procesado (ya en SDR, escalado y
+    con nitidez): lado corto a 480, H.264 rápido, audio copiado. Unos
+    segundos de proceso y ~0.5 Mbps."""
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", video_path,
+                "-vf", "scale='if(gt(ih,iw),min(480,iw),-2)':'if(gt(ih,iw),-2,min(480,ih))'",
+                "-pix_fmt", "yuv420p",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "27",
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                preview_path,
+            ],
+            capture_output=True,
+            timeout=600,
+        )
+        if result.returncode != 0:
+            print(f"[_make_admin_preview] ffmpeg falló: {result.stderr.decode(errors='replace')[-1000:]}")
+            return False
+        return True
+    except Exception as exc:
+        print(f"[_make_admin_preview] excepción: {exc!r}")
+        return False
+
+
+def reel_preview_url(video_url: Optional[str]) -> Optional[str]:
+    """URL de la vista previa del admin (ver REEL_PREVIEW_NAME) para un
+    video.mp4 de reel; para cualquier otro video, el mismo video. Reels en
+    H.264 o anteriores a esto no la tienen: el admin, si falla, prueba con
+    video_url."""
+    if video_url and video_url.endswith("/" + REEL_MP4_NAME):
+        return video_url[: -len(REEL_MP4_NAME)] + REEL_PREVIEW_NAME
+    return video_url or None
+
+
+def stage_video_upload(file: UploadFile) -> str:
+    """Guarda el video subido en una carpeta temporal propia (no se borra al
+    terminar la petición) y devuelve su ruta, para procesarlo después en
+    segundo plano con process_reel_video. Valida formato y tamaño acá, así
+    el admin ve el error en la misma respuesta."""
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in ALLOWED_VIDEO_EXT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Formato de video no permitido. Usa: {', '.join(ALLOWED_VIDEO_EXT)}",
+        )
+    work = tempfile.mkdtemp(prefix="reel_upload_")
+    path = os.path.join(work, f"upload{ext}")
+    try:
+        _write_upload(file, path, MAX_VIDEO_SIZE_BYTES, "El video")
+    except Exception:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+    return path
+
+
+def discard_staged_upload(staged_path: str) -> None:
+    shutil.rmtree(os.path.dirname(staged_path), ignore_errors=True)
+
+
+def process_reel_video(staged_path: str) -> Tuple[str, Optional[str]]:
+    """Procesa un video ya guardado con stage_video_upload como MP4 de reel
+    (ver reel_rendition) más su versión liviana para datos móviles, y los
+    sube al storage junto con el original de respaldo. Devuelve (URL del
+    MP4, URL de la versión liviana o None si no se pudo generar: el reel
+    funciona igual, solo que con datos usa la principal). Lanza
+    RuntimeError si falla el MP4 principal: a diferencia de save_video,
+    NO cae al original crudo (un .mov HDR del iPhone ni siquiera reproduce
+    bien en muchos celulares); el reel queda marcado como fallido.
+    Borra siempre la carpeta temporal del upload."""
+    ext = os.path.splitext(staged_path)[1].lower()
+    name = uuid.uuid4().hex
+    filename = f"{name}{ext}"
+    videos_key = "marketplace/reels/videos"
+    work = os.path.dirname(staged_path)
+    try:
+        _remux_faststart(staged_path)
+        out_dir = os.path.join(work, name)
+        os.makedirs(out_dir)
+        video_path = os.path.join(out_dir, REEL_MP4_NAME)
+        if not _compress_single_video(staged_path, video_path):
+            raise RuntimeError("No se pudo procesar el video (ffmpeg falló).")
+        # Desde el original (no desde video.mp4): una sola recompresión.
+        has_sd = _compress_single_video(
+            staged_path, os.path.join(out_dir, REEL_SD_NAME), reel_rendition(sd=True)
+        )
+        if reel_rendition()["codec"] != "libx264":
+            # Sin vista previa el reel funciona igual en la app: no es motivo
+            # para fallar el procesamiento.
+            _make_admin_preview(video_path, os.path.join(out_dir, REEL_PREVIEW_NAME))
+        storage.put_dir(out_dir, f"{videos_key}/{name}", last=REEL_MP4_NAME)
+        storage.put_file(staged_path, f"{videos_key}/{filename}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    sd_url = storage.public_url(f"{videos_key}/{name}/{REEL_SD_NAME}") if has_sd else None
+    return storage.public_url(f"{videos_key}/{name}/{REEL_MP4_NAME}"), sd_url
 
 
 def _processed_dir_key(key: str) -> Optional[str]:

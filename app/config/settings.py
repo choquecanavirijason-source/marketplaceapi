@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     # distribución y no hay que tocar nada más.
     aws_public_base_url: str = ""
 
+    # Códec del MP4 de reels (ver REEL_RENDITIONS en app/core/media.py):
+    # "hevc" = H.265 en 1080 con el peso del 720 en H.264; "h264" = 720,
+    # máxima compatibilidad. Interruptor para volver a h264 sin tocar código
+    # si algún celular no reproduce H.265. Solo afecta a reels subidos después.
+    reels_video_codec: str = "hevc"
+    # Filtro de nitidez suave después de escalar (casi sin costo de peso).
+    reels_sharpen: bool = True
+
     class Config:
         env_file = ".env"
         case_sensitive = False

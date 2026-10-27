@@ -6,8 +6,9 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.dependencies import get_db, get_admin_user
-from app.core.media import get_video_download_url, save_image, save_video
+from app.core.media import get_video_download_url, reel_preview_url, save_image, stage_video_upload
 from app.core.media_usage import discard_media
+from app.core.reel_processing import new_job_id, process_reel_in_background
 from app.domain.entities.customer import Customer
 from app.domain.entities.reel import Reel
 from app.domain.entities.reel_like import ReelLike
@@ -39,11 +40,18 @@ def _to_dict(
         "id": r.id,
         "video_url": r.video_url,
         "video_download_url": get_video_download_url(r.video_url),
+        # Para el admin (navegador de PC): ver REEL_PREVIEW_NAME en media.py.
+        "video_preview_url": reel_preview_url(r.video_url),
+        # Para la app con datos móviles: ver REEL_SD_NAME en media.py.
+        "video_sd_url": r.video_sd_url,
         "thumbnail_url": r.thumbnail_url,
         "caption": r.caption,
         "product_id": r.product_id,
         "product": product,
         "is_active": r.is_active,
+        # Video procesándose en segundo plano (ver reel_processing.py).
+        "processing_status": r.processing_status or "ready",
+        "processing_error": r.processing_error,
         "sort_order": r.sort_order,
         "created_at": r.created_at.isoformat() if r.created_at else None,
         "like_count": like_count,
@@ -74,6 +82,13 @@ def _liked_reel_ids(db: Session, customer_id: Optional[int], reel_ids: list[int]
     return {reel_id for (reel_id,) in rows}
 
 
+def _visible_in_app(q):
+    """Lo que ve la app: activos y con video. Un reel nuevo cuyo video
+    todavía se procesa (o falló) tiene video_url vacío y queda oculto; uno
+    existente al que se le cambia el video sigue con el anterior."""
+    return q.filter(Reel.is_active == True, Reel.video_url != "")
+
+
 def _load(
     db: Session,
     *,
@@ -84,7 +99,7 @@ def _load(
 ):
     q = db.query(Reel).options(joinedload(Reel.product))
     if active_only:
-        q = q.filter(Reel.is_active == True)
+        q = _visible_in_app(q)
     if ids is not None:
         q = q.filter(Reel.id.in_(ids))
     q = q.order_by(Reel.sort_order, Reel.id)
@@ -128,8 +143,7 @@ def list_reel_ids(db: Session = Depends(get_db)):
     """Ids de los reels activos, en orden. Consulta liviana para que la app
     detecte reels nuevos o eliminados sin bajar la lista completa."""
     rows = (
-        db.query(Reel.id)
-        .filter(Reel.is_active == True)
+        _visible_in_app(db.query(Reel.id))
         .order_by(Reel.sort_order, Reel.id)
         .all()
     )
@@ -146,7 +160,8 @@ def list_my_liked_reels(
         db.query(Reel)
         .join(ReelLike, ReelLike.reel_id == Reel.id)
         .options(joinedload(Reel.product))
-        .filter(ReelLike.customer_id == current_customer.id, Reel.is_active == True)
+        .filter(ReelLike.customer_id == current_customer.id)
+        .filter(Reel.is_active == True, Reel.video_url != "")
         .order_by(ReelLike.created_at.desc())
         .all()
     )
@@ -225,28 +240,37 @@ async def create_reel(
     sort_order: int = Form(0),
     video: Optional[UploadFile] = File(None),
     thumbnail: Optional[UploadFile] = File(None),
+    background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db),
     _=Depends(get_admin_user),
 ):
-    final_video_url = await run_in_threadpool(save_video, video, "reels") if video and video.filename else (video_url or None)
-    if not final_video_url:
+    has_upload = bool(video and video.filename)
+    if not has_upload and not video_url:
         raise HTTPException(status_code=400, detail="Sube un video o pega un link directo (mp4, etc.)")
 
     if product_id and not db.query(Product).filter(Product.id == product_id).first():
         raise HTTPException(status_code=400, detail="Producto no existe")
 
+    # Solo se guarda el archivo: el procesamiento (minutos con H.265) corre
+    # después de responder. Mientras tanto el reel queda oculto en la app.
+    staged = await run_in_threadpool(stage_video_upload, video) if has_upload else None
     thumbnail_url = save_image(thumbnail, "reels") if thumbnail and thumbnail.filename else None
 
+    job = new_job_id() if staged else None
     reel = Reel(
-        video_url=final_video_url,
+        video_url="" if staged else video_url,
         thumbnail_url=thumbnail_url,
         caption=caption,
         product_id=product_id or None,
         sort_order=sort_order,
+        processing_status="processing" if staged else "ready",
+        processing_job=job,
     )
     db.add(reel)
     db.commit()
     db.refresh(reel)
+    if staged:
+        background_tasks.add_task(process_reel_in_background, reel.id, job, staged)
     return _to_dict(
         db.query(Reel).options(joinedload(Reel.product)).filter(Reel.id == reel.id).first()
     )
@@ -271,8 +295,22 @@ async def update_reel(
         raise HTTPException(status_code=404, detail="Reel no encontrado")
     old_media = (reel.video_url, reel.thumbnail_url)
 
-    if video and video.filename:      reel.video_url = await run_in_threadpool(save_video, video, "reels")
-    elif video_url is not None:       reel.video_url = video_url or reel.video_url
+    staged = None
+    if video and video.filename:
+        # El reel sigue mostrando su video actual hasta que el nuevo termine
+        # de procesarse; recién ahí se cambia y se borra el anterior.
+        staged = await run_in_threadpool(stage_video_upload, video)
+        reel.processing_status = "processing"
+        reel.processing_error = None
+        reel.processing_job = new_job_id()
+    elif video_url:
+        # Link pegado a mano: reemplaza al instante y cancela cualquier
+        # procesamiento pendiente (su resultado se descarta).
+        reel.video_url = video_url
+        reel.video_sd_url = None
+        reel.processing_status = "ready"
+        reel.processing_error = None
+        reel.processing_job = None
     if caption is not None:           reel.caption = caption
     if product_id is not None:        reel.product_id = None if product_id == 0 else product_id
     if sort_order is not None:        reel.sort_order = sort_order
@@ -281,6 +319,8 @@ async def update_reel(
 
     db.commit()
     discard_media(db, background_tasks, *old_media)
+    if staged:
+        background_tasks.add_task(process_reel_in_background, reel.id, reel.processing_job, staged)
     db.refresh(reel)
     return _to_dict(
         db.query(Reel).options(joinedload(Reel.product)).filter(Reel.id == reel.id).first()
